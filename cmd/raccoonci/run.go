@@ -174,9 +174,12 @@ func runWorkflow(args []string, cat *catalog.Catalog) (ok bool, err error) {
 		Jobs:        jobs,
 		MaxParallel: *parallel,
 		Runner: runner.Config{
-			ToolCache:  toolCache,
-			Actions:    actions.NewStore(filepath.Join(*workDir, "_actions"), secretValues["GITHUB_TOKEN"]),
-			Node:       node.Binary,
+			ToolCache: toolCache,
+			Actions:   actions.NewStore(filepath.Join(*workDir, "_actions"), secretValues["GITHUB_TOKEN"]),
+			Node:      node.Binary,
+			// Container jobs reach the Node.js runtimes and the downloaded
+			// actions at the same paths as the host.
+			Mounts:     []string{node.Dir, filepath.Join(*workDir, "_actions")},
 			Checkout:   local.Checkout(repo, repository.(string)),
 			ServiceEnv: svcEnv,
 			RunnerName: "raccoonci-local",
