@@ -8,8 +8,10 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"maps"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -153,12 +155,12 @@ func runWorkflow(args []string, cat *catalog.Catalog) (ok bool, err error) {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	runID, _ := github.Get("run_id")
-	svcEnv, stopServices, err := localServices(filepath.Join(*workDir, "_artifacts"),
+	svc, err := localServices(filepath.Join(*workDir, "_artifacts"),
 		filepath.Join(cache, "actions-cache", repoDirName(repository.(string))), runID.(string), *cacheProtocol == "v2")
 	if err != nil {
 		return false, fmt.Errorf("artifact service: %w", err)
 	}
-	defer stopServices()
+	defer svc.stop()
 
 	fmt.Printf("running %s in %s\n", path, *workDir)
 	res, err := engine.Run(ctx, w, engine.Options{
@@ -179,11 +181,12 @@ func runWorkflow(args []string, cat *catalog.Catalog) (ok bool, err error) {
 			Node:      node.Binary,
 			// Container jobs reach the Node.js runtimes and the downloaded
 			// actions at the same paths as the host.
-			Mounts:     []string{node.Dir, filepath.Join(*workDir, "_actions")},
-			Checkout:   local.Checkout(repo, repository.(string)),
-			ServiceEnv: svcEnv,
-			RunnerName: "raccoonci-local",
-			OnEvent:    printer.Event,
+			Mounts:            []string{node.Dir, filepath.Join(*workDir, "_actions")},
+			Checkout:          local.Checkout(repo, repository.(string)),
+			ServiceEnv:        svc.env,
+			ContainerServices: svc.serveNetwork,
+			RunnerName:        "raccoonci-local",
+			OnEvent:           printer.Event,
 		},
 	})
 	if err != nil {
@@ -233,28 +236,35 @@ func repoDirName(repository string) string {
 	return hex.EncodeToString(sum[:4]) + "-" + safe
 }
 
-// localServices serves the runtime services steps call (artifacts and the
-// cache) on one loopback port, and returns the environment that points steps
-// at them. Artifacts live under artifactDir, for this run; cache entries
-// under cacheDir, which outlives it. The returned func shuts everything down.
+// services are the runtime services steps call (artifacts and the cache).
+type services struct {
+	handler http.Handler
+	base    string            // the loopback address, http://127.0.0.1:port
+	env     map[string]string // points steps on the host at base
+	stop    func()
+}
+
+// localServices serves the runtime services on one loopback port. Artifacts
+// live under artifactDir, for this run; cache entries under cacheDir, which
+// outlives it.
 //
 // A cache that cannot start is reported and left out: jobs then run without
 // one, as actions/cache does when the service is missing.
-func localServices(artifactDir, cacheDir, runID string, cacheV2 bool) (map[string]string, func(), error) {
+func localServices(artifactDir, cacheDir, runID string, cacheV2 bool) (*services, error) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	key := make([]byte, 32)
 	if _, err := rand.Read(key); err != nil {
 		ln.Close()
-		return nil, nil, err
+		return nil, err
 	}
 	base := "http://" + ln.Addr().String()
 	signer, err := artifact.NewSigner(key)
 	if err != nil {
 		ln.Close()
-		return nil, nil, err
+		return nil, err
 	}
 	// One token for the whole run: every job of a local run is the same user.
 	scope := artifact.Scope{Run: runID, Job: "local"}
@@ -272,19 +282,19 @@ func localServices(artifactDir, cacheDir, runID string, cacheV2 bool) (map[strin
 	artStore, err := blob.NewDir(artifactDir, base, key)
 	if err != nil {
 		closeAll()
-		return nil, nil, err
+		return nil, err
 	}
 	closers = append(closers, func() { artStore.Close() })
 	artSvc, err := artifact.New(artifact.Config{Store: artStore, Signer: signer, BaseURL: base})
 	if err != nil {
 		closeAll()
-		return nil, nil, err
+		return nil, err
 	}
 	closers = append(closers, artSvc.Close)
 	env, err := artSvc.Env(scope, tokenTTL)
 	if err != nil {
 		closeAll()
-		return nil, nil, err
+		return nil, err
 	}
 	mux.Handle(blob.DownloadPrefix, artStore.Handler())
 
@@ -300,7 +310,32 @@ func localServices(artifactDir, cacheDir, runID string, cacheV2 bool) (map[strin
 	mux.Handle("/", artSvc.Handler())
 	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 30 * time.Second}
 	go srv.Serve(ln)
-	return env, func() { srv.Close(); closeAll() }, nil
+	return &services{handler: mux, base: base, env: env, stop: func() { srv.Close(); closeAll() }}, nil
+}
+
+// serveNetwork also serves on a docker network's gateway, for a job
+// container, and returns the environment that points it there (see
+// runner.Config.ContainerServices). It listens on that one address and
+// accepts only the network's own subnet, so the services are not exposed on
+// the host's other interfaces or to other docker networks; the token and the
+// signed URLs guard them as on loopback. The links the services hand out are
+// built on whichever address the request came in on.
+func (s *services) serveNetwork(gateway netip.Addr, subnet netip.Prefix) (map[string]string, func(), error) {
+	ln, err := net.Listen("tcp", netip.AddrPortFrom(gateway, 0).String())
+	if err != nil {
+		return nil, nil, err
+	}
+	base := "http://" + ln.Addr().String()
+	srv := &http.Server{Handler: s.handler, ReadHeaderTimeout: 30 * time.Second,
+		BaseContext: func(net.Listener) context.Context { return blob.WithBaseURL(context.Background(), base) }}
+	go srv.Serve(local.OnlyFrom(ln, subnet))
+	env := maps.Clone(s.env)
+	for k, v := range env {
+		if v == s.base+"/" { // ACTIONS_RESULTS_URL, ACTIONS_CACHE_URL
+			env[k] = base + "/"
+		}
+	}
+	return env, func() { srv.Close() }, nil
 }
 
 func startCache(mux *http.ServeMux, closers *[]func(), base, dir string, key []byte,
