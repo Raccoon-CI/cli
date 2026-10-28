@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
@@ -20,6 +22,7 @@ import (
 	"raccoonci/internal/actions"
 	"raccoonci/internal/artifact"
 	"raccoonci/internal/blob"
+	"raccoonci/internal/cache"
 	"raccoonci/internal/catalog"
 	"raccoonci/internal/engine"
 	"raccoonci/internal/local"
@@ -146,11 +149,12 @@ func runWorkflow(args []string, cat *catalog.Catalog) (ok bool, err error) {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	runID, _ := github.Get("run_id")
-	svcEnv, stopArtifacts, err := localArtifacts(filepath.Join(*workDir, "_artifacts"), runID.(string))
+	svcEnv, stopServices, err := localServices(filepath.Join(*workDir, "_artifacts"),
+		filepath.Join(cache, "actions-cache", repoDirName(repository.(string))), runID.(string))
 	if err != nil {
 		return false, fmt.Errorf("artifact service: %w", err)
 	}
-	defer stopArtifacts()
+	defer stopServices()
 
 	fmt.Printf("running %s in %s\n", path, *workDir)
 	res, err := engine.Run(ctx, w, engine.Options{
@@ -209,10 +213,27 @@ func gitTopLevel(dir string) string {
 	return strings.TrimSpace(string(out))
 }
 
-// localArtifacts serves the artifact protocol on a loopback port, keeping the
-// files under dir, and returns the environment that points steps at it. The
-// returned func shuts it down.
-func localArtifacts(dir, runID string) (map[string]string, func(), error) {
+// repoDirName turns "owner/name" into a directory name that cannot collide
+// with another repository's, whatever characters the names hold.
+func repoDirName(repository string) string {
+	sum := sha256.Sum256([]byte(repository))
+	safe := strings.Map(func(r rune) rune {
+		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-' || r == '_' || r == '.' {
+			return r
+		}
+		return '_'
+	}, repository)
+	return hex.EncodeToString(sum[:4]) + "-" + safe
+}
+
+// localServices serves the runtime services steps call (artifacts and the
+// cache) on one loopback port, and returns the environment that points steps
+// at them. Artifacts live under artifactDir, for this run; cache entries
+// under cacheDir, which outlives it. The returned func shuts everything down.
+//
+// A cache that cannot start is reported and left out: jobs then run without
+// one, as actions/cache does when the service is missing.
+func localServices(artifactDir, cacheDir, runID string) (map[string]string, func(), error) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return nil, nil, err
@@ -223,35 +244,78 @@ func localArtifacts(dir, runID string) (map[string]string, func(), error) {
 		return nil, nil, err
 	}
 	base := "http://" + ln.Addr().String()
-	store, err := blob.NewDir(dir, base, key)
-	if err != nil {
-		ln.Close()
-		return nil, nil, err
-	}
 	signer, err := artifact.NewSigner(key)
 	if err != nil {
 		ln.Close()
 		return nil, nil, err
 	}
-	svc, err := artifact.New(artifact.Config{Store: store, Signer: signer, BaseURL: base})
-	if err != nil {
-		ln.Close()
-		return nil, nil, err
-	}
 	// One token for the whole run: every job of a local run is the same user.
-	env, err := svc.Env(artifact.Scope{Run: runID, Job: "local"}, 24*time.Hour)
-	if err != nil {
+	scope := artifact.Scope{Run: runID, Job: "local"}
+	const tokenTTL = 24 * time.Hour
+
+	var closers []func()
+	closeAll := func() {
 		ln.Close()
-		return nil, nil, err
+		for i := len(closers) - 1; i >= 0; i-- {
+			closers[i]()
+		}
 	}
 	mux := http.NewServeMux()
-	mux.Handle(blob.DownloadPrefix, store.Handler())
-	mux.Handle("/", svc.Handler())
+
+	artStore, err := blob.NewDir(artifactDir, base, key)
+	if err != nil {
+		closeAll()
+		return nil, nil, err
+	}
+	closers = append(closers, func() { artStore.Close() })
+	artSvc, err := artifact.New(artifact.Config{Store: artStore, Signer: signer, BaseURL: base})
+	if err != nil {
+		closeAll()
+		return nil, nil, err
+	}
+	closers = append(closers, artSvc.Close)
+	env, err := artSvc.Env(scope, tokenTTL)
+	if err != nil {
+		closeAll()
+		return nil, nil, err
+	}
+	mux.Handle(blob.DownloadPrefix, artStore.Handler())
+
+	if cacheEnv, err := startCache(mux, &closers, base, cacheDir, key, signer, scope, tokenTTL); err != nil {
+		fmt.Fprintf(os.Stderr, "raccoonci: cache disabled: %v\n", err)
+	} else {
+		for k, v := range cacheEnv {
+			env[k] = v
+		}
+	}
+
+	// Only the artifact routes sit at "/"; the cache has its own prefix.
+	mux.Handle("/", artSvc.Handler())
 	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 30 * time.Second}
 	go srv.Serve(ln)
-	return env, func() {
-		srv.Close()
+	return env, func() { srv.Close(); closeAll() }, nil
+}
+
+func startCache(mux *http.ServeMux, closers *[]func(), base, dir string, key []byte,
+	signer *artifact.Signer, scope artifact.Scope, ttl time.Duration) (map[string]string, error) {
+	store, err := blob.NewDir(filepath.Join(dir, "objects"), base, key)
+	if err != nil {
+		return nil, err
+	}
+	store.Prefix = "/_cache_dl/"
+	svc, err := cache.New(cache.Config{Store: store, Signer: signer, BaseURL: base, IndexPath: filepath.Join(dir, "index.json")})
+	if err != nil {
+		store.Close()
+		return nil, err
+	}
+	env, err := svc.Env(scope, ttl)
+	if err != nil {
 		svc.Close()
 		store.Close()
-	}, nil
+		return nil, err
+	}
+	*closers = append(*closers, func() { store.Close() }, svc.Close)
+	mux.Handle(store.Prefix, store.Handler())
+	mux.Handle("/_apis/artifactcache/", svc.Handler())
+	return env, nil
 }
