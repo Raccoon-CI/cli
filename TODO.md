@@ -85,7 +85,11 @@ Node.js、Go、apt 包已经通了（见"已完成"）。还缺：
 
 - ✅ 容器 job（`container:`）和 `services:`：`internal/docker`、`internal/runner/containers.go`。用真实 Docker 实测（`RACCOONCI_TEST_DOCKER=1`）：busybox 和 debian:bookworm-slim 作 job 容器、redis 作 service（健康检查、容器内按名字访问、宿主机 job 通过发布的端口访问）、容器内的本地 Node action、job 失败/镜像不存在/service 不健康时的清理，结束后没有残留容器和网络
 - ✅ 容器 job 里的 artifact 和 cache 服务：job 网络建好后，服务在这张网络的网关地址（宿主机在这张网络上的地址）上再开一个监听，只接受这张网络子网内的连接；签发的上传/下载链接按请求进来的那个地址生成（`blob.WithBaseURL`），鉴权不变。实测：容器里 `upload-artifact@v4`（12 MB）+ `actions/cache@v4`（v1 和 v2 都测了），之后容器 job 和宿主机 job 各自下载并校验通过；其他 docker 网络和宿主机 eth0 地址连不上，同一网络里没有 token 返回 401；跑完后监听、网络、容器都没有残留。rootless docker 下不支持（网络不在宿主机上），会给出警告
-- ⬜ 容器 job 剩余：宿主机防火墙若拦截 INPUT（如 ufw 默认 deny），容器连网关会失败，目前没有检测；Alpine 等 musl 镜像跑不了 JS action（挂进去的是 glibc 版 Node，会给出明确报错）；非 root 用户的镜像（`--user`）；被强杀的进程留下的孤儿容器没有清扫（容器带标签 `raccoonci=1`）；`docker exec` 不转发信号，取消只会杀 docker 客户端，容器内进程要到 job 结束删容器时才停；`docker login` 的 registry 凭据只测了单元测试，没对真实私有仓库测过
+- ✅ 取消容器里的步骤：步骤经 `sh -c 'echo $$ >pidfile; exec …'` 启动（docker 把每个 exec 放进自己的进程组，pid 即 pgid），取消时用另一次 `docker exec` 向容器内的进程组发 SIGINT，宽限期后发 SIGKILL。实测：步骤里的 `trap INT` 会执行，后台子进程随组退出；去掉这处修复后该测试会失败
+- ✅ `docker login` 对真实私有仓库：本地 `registry:2` + htpasswd 认证，job 用 `credentials:` 拉取成功；密码错误则 job 失败且日志里没有密码；宿主机自己的 docker 配置没有被登录状态污染
+- ✅ job 结束后 chown：断言容器里 root 写的文件归还给当前用户；把 chown 关掉后断言会失败
+- ✅ Alpine（musl）镜像的 JS action：job 容器是 musl 时用 `unofficial-builds.nodejs.org` 的 musl 版 Node（同样校验 SHA-256，装在 `node/musl/` 下，随 `node/` 一起挂进容器）。musl 版动态链接 libstdc++，Alpine 没有，所以 Node 起不来时在容器里以 root 执行 `apk add libstdc++`（只影响这个 job 的容器，步骤日志有 notice）。实测真实 `upload-artifact@v4`/`download-artifact@v4` 在 Alpine 容器里跑通。`actions/cache` 在裸 Alpine 里会因 busybox 的 tar 失败，与 GitHub 上相同，镜像里需要 `apk add tar`
+- ⬜ 容器 job 剩余：宿主机防火墙若拦截 INPUT（如 ufw 默认 deny），容器连网关会失败，目前没有检测；非 root 用户的镜像（`--user`）；被强杀的进程留下的孤儿容器没有清扫（容器带标签 `raccoonci=1`）；Alpine 的 `apk add` 需要容器能访问 Alpine 镜像源，离线或非 root 的 Alpine 镜像要自己预装 libstdc++；没有 `/bin/sh` 的镜像（distroless）上取消仍然只会杀 docker 客户端
 - ⬜ Docker action（`uses: docker://…`、`runs.using: docker`）
 - ⬜ 可复用 workflow（`jobs.<id>.uses`、`workflow_call`）
 - ⬜ problem matcher（目前输出原样记录，不生成 annotation）

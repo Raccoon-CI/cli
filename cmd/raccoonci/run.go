@@ -128,6 +128,10 @@ func runWorkflow(args []string, cat *catalog.Catalog) (ok bool, err error) {
 	repository, _ := github.Get("repository")
 	node := nodejs.New(filepath.Join(cache, "node"))
 	node.Catalog = cat
+	// For job containers on musl images (Alpine). Inside node.Dir, so the
+	// mount below covers it.
+	nodeMusl := nodejs.NewMusl(filepath.Join(node.Dir, "musl"))
+	nodeMusl.Catalog = cat
 	printer := &local.Printer{Out: os.Stdout, Debug: *debug}
 
 	toolCache := filepath.Join(cache, "toolcache")
@@ -179,6 +183,7 @@ func runWorkflow(args []string, cat *catalog.Catalog) (ok bool, err error) {
 			ToolCache: toolCache,
 			Actions:   actions.NewStore(filepath.Join(*workDir, "_actions"), secretValues["GITHUB_TOKEN"]),
 			Node:      node.Binary,
+			NodeMusl:  nodeMusl.Binary,
 			// Container jobs reach the Node.js runtimes and the downloaded
 			// actions at the same paths as the host.
 			Mounts:            []string{node.Dir, filepath.Join(*workDir, "_actions")},
