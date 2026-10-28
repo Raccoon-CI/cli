@@ -12,9 +12,9 @@
 |---|------|------|------|
 | 1 | workflow 解析 + matrix 展开 | ✅ | 含表达式求值 |
 | 2 | 依赖扫描器 | ✅ | |
-| 3 | 单机执行器 | 🟡 | `run:`、JS/composite action 可用；容器、Docker action、可复用 workflow 不支持 |
+| 3 | 单机执行器 | 🟡 | `run:`、JS/composite action、容器 job 和 `services:` 可用；Docker action、可复用 workflow 不支持 |
 | 3.5 | 装环境（按扫描结果安装） | 🟡 | Node.js、Go、Python、apt 包已通；Java、Ruby、Rust 和各种 CLI 工具还没有安装器（见 3.1） |
-| 4 | artifact v4 + cache v1 服务 | ✅ | 两者在本机运行里都用真实 action 实测通过；v3 REST、持久化/淘汰等见 3.2 |
+| 4 | artifact v4 + cache v1/v2 服务 | ✅ | 两者在本机运行里都用真实 action 实测通过；v3 REST、持久化/淘汰等见 3.2 |
 | 5 | InstaBox provider | ⬜ | |
 
 ## 二、已完成
@@ -50,7 +50,7 @@
 
 **真实环境实测过的**：`actions/setup-node@v4` 真实运行；`runner-images update` 联网成功；`setup-node` 输出 `Found in cache`，说明预填被官方 action 认可。在一台**全新的 InstaBox Debian 13 沙箱**（没有 go、make、gcc、tree、pip）上，一个没声明任何版本的 job 用 5 秒装好 node 22.23.3、go 1.24.13、make、gcc、tree 并通过；`setup-python@v5` 修复后通过。其余网络相关代码只有假服务器测试。
 
-**测试机**：为此建了一台 InstaBox 沙箱 `test-machine`（`m_EXAMPLE_MACHINE_ID`，已停止）。MCP 没有删除工具，**需要在控制台手动删除**。
+**测试机**：为此建过一台 InstaBox 沙箱 `test-machine`（`m_EXAMPLE_MACHINE_ID`）。2026-10-28 核对时它已不在当前账号的机器列表里，无需再处理。
 
 **文档**：`CLAUDE.md`（架构与约定）、`docs/gha-compat.md`（GHA 运行时依赖调研，参考 act / Gitea）
 
@@ -83,7 +83,8 @@ Node.js、Go、apt 包已经通了（见"已完成"）。还缺：
 
 ### 3.3 job 类型缺口（现在会给出明确报错，不会静默）
 
-- ⬜ 容器 job（`container:`）和 `services:`
+- ✅ 容器 job（`container:`）和 `services:`：`internal/docker`、`internal/runner/containers.go`。用真实 Docker 实测（`RACCOONCI_TEST_DOCKER=1`）：busybox 和 debian:bookworm-slim 作 job 容器、redis 作 service（健康检查、容器内按名字访问、宿主机 job 通过发布的端口访问）、容器内的本地 Node action、job 失败/镜像不存在/service 不健康时的清理，结束后没有残留容器和网络
+- ⬜ 容器 job 剩余：**artifact 和 cache 服务在容器内连不上**（它们只监听 127.0.0.1，实测 `upload-artifact` 报 ECONNREFUSED）；Alpine 等 musl 镜像跑不了 JS action（挂进去的是 glibc 版 Node，会给出明确报错）；非 root 用户的镜像（`--user`）；被强杀的进程留下的孤儿容器没有清扫（容器带标签 `raccoonci=1`）；`docker exec` 不转发信号，取消只会杀 docker 客户端，容器内进程要到 job 结束删容器时才停；`docker login` 的 registry 凭据只测了单元测试，没对真实私有仓库测过
 - ⬜ Docker action（`uses: docker://…`、`runs.using: docker`）
 - ⬜ 可复用 workflow（`jobs.<id>.uses`、`workflow_call`）
 - ⬜ problem matcher（目前输出原样记录，不生成 annotation）
@@ -131,7 +132,6 @@ Node.js、Go、apt 包已经通了（见"已完成"）。还缺：
 
 ## 四、工程与风险
 
-- ⬜ **git 提交**：上次提交（`59c4a82`）之后的 catalog 拉取与硬编码清理还没提交（工作区 20 项改动）
 - ⬜ 用 Raccoon CI 自己跑自己的 `make check`（dogfood），同时也是第一个真实的端到端用例
 - ⬜ 兼容性语料：act 和 toolkit 的 workflow 文件**只验证了能解析**，整套跑起来的只有手写的小例子
 - 🟡 硬编码原则：evolving 的名单都已进 catalog；GitHub 协议本身（字段名、workflow 命令名、上限）和下载地址有意留在代码里，原因见 `CLAUDE.md`
