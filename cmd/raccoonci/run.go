@@ -2,9 +2,12 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"flag"
 	"fmt"
+	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -15,6 +18,8 @@ import (
 	"time"
 
 	"raccoonci/internal/actions"
+	"raccoonci/internal/artifact"
+	"raccoonci/internal/blob"
 	"raccoonci/internal/catalog"
 	"raccoonci/internal/engine"
 	"raccoonci/internal/local"
@@ -140,6 +145,13 @@ func runWorkflow(args []string, cat *catalog.Catalog) (ok bool, err error) {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	runID, _ := github.Get("run_id")
+	svcEnv, stopArtifacts, err := localArtifacts(filepath.Join(*workDir, "_artifacts"), runID.(string))
+	if err != nil {
+		return false, fmt.Errorf("artifact service: %w", err)
+	}
+	defer stopArtifacts()
+
 	fmt.Printf("running %s in %s\n", path, *workDir)
 	res, err := engine.Run(ctx, w, engine.Options{
 		Github:      github,
@@ -158,6 +170,7 @@ func runWorkflow(args []string, cat *catalog.Catalog) (ok bool, err error) {
 			Actions:    actions.NewStore(filepath.Join(*workDir, "_actions"), secretValues["GITHUB_TOKEN"]),
 			Node:       node.Binary,
 			Checkout:   local.Checkout(repo, repository.(string)),
+			ServiceEnv: svcEnv,
 			RunnerName: "raccoonci-local",
 			OnEvent:    printer.Event,
 		},
@@ -194,4 +207,51 @@ func gitTopLevel(dir string) string {
 		}
 	}
 	return strings.TrimSpace(string(out))
+}
+
+// localArtifacts serves the artifact protocol on a loopback port, keeping the
+// files under dir, and returns the environment that points steps at it. The
+// returned func shuts it down.
+func localArtifacts(dir, runID string) (map[string]string, func(), error) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return nil, nil, err
+	}
+	key := make([]byte, 32)
+	if _, err := rand.Read(key); err != nil {
+		ln.Close()
+		return nil, nil, err
+	}
+	base := "http://" + ln.Addr().String()
+	store, err := blob.NewDir(dir, base, key)
+	if err != nil {
+		ln.Close()
+		return nil, nil, err
+	}
+	signer, err := artifact.NewSigner(key)
+	if err != nil {
+		ln.Close()
+		return nil, nil, err
+	}
+	svc, err := artifact.New(artifact.Config{Store: store, Signer: signer, BaseURL: base})
+	if err != nil {
+		ln.Close()
+		return nil, nil, err
+	}
+	// One token for the whole run: every job of a local run is the same user.
+	env, err := svc.Env(artifact.Scope{Run: runID, Job: "local"}, 24*time.Hour)
+	if err != nil {
+		ln.Close()
+		return nil, nil, err
+	}
+	mux := http.NewServeMux()
+	mux.Handle(blob.DownloadPrefix, store.Handler())
+	mux.Handle("/", svc.Handler())
+	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 30 * time.Second}
+	go srv.Serve(ln)
+	return env, func() {
+		srv.Close()
+		svc.Close()
+		store.Close()
+	}, nil
 }
