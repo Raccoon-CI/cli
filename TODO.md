@@ -14,7 +14,7 @@
 | 2 | 依赖扫描器 | ✅ | |
 | 3 | 单机执行器 | 🟡 | `run:`、JS/composite action 可用；容器、Docker action、可复用 workflow 不支持 |
 | 3.5 | 装环境（按扫描结果安装） | 🟡 | Node.js、Go、Python、apt 包已通；Java、Ruby、Rust 和各种 CLI 工具还没有安装器（见 3.1） |
-| 4 | artifact v4 + cache v1 服务 | ⬜ | 实测 `upload-artifact` 报错，`cache` 静默不命中 |
+| 4 | artifact v4 + cache v1 服务 | 🟡 | artifact v4 已通（本机运行，真实 action 实测）；cache v1 未做，`cache` 仍静默不命中 |
 | 5 | InstaBox provider | ⬜ | |
 
 ## 二、已完成
@@ -71,7 +71,8 @@ Node.js、Go、apt 包已经通了（见"已完成"）。还缺：
 
 ### 3.2 运行时服务（GHA action 依赖的内部接口）
 
-- ⬜ artifact v4（Twirp）与 v3 REST。**实测**：`upload-artifact@v4` 报 `Unable to get the ACTIONS_RUNTIME_TOKEN`
+- ✅ artifact v4（Twirp + Azure Blob 的 Put Block / Put Block List）：`internal/artifact`、`internal/blob`（本地目录和 S3 兼容存储）。`raccoonci run` 里 `upload-artifact@v4` 与 `download-artifact@v4` 跨 job 实测通过（20 MB，sha256 一致）
+- ⬜ artifact 剩余：v3 REST；按 job 签发 token（现在整个 run 共用一个）；元数据持久化（现在在内存）；retention 到期清理（`expires_at` 只存不执行）；整体 sha256 校验（现在只记录）；服务端接 S3 并在真实 AWS 上验证（目前只测过 SeaweedFS）；`download-artifact` 的按 ID 跨 run 下载（需要 GitHub token，未做）
 - ⬜ cache v1（`/_apis/artifactcache`）。**实测**：`actions/cache@v4` 只打一条 warning 就当未命中，job 还显示成功，等于缓存没生效且不易察觉
 - ⬜ OIDC token 端点（`ACTIONS_ID_TOKEN_REQUEST_URL`）
 - ⬜ 真实的 `GITHUB_TOKEN`（GitHub App installation token，调用真实 GitHub API）
