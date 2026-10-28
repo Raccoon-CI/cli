@@ -9,13 +9,13 @@ import (
 	"fmt"
 	"io/fs"
 
-	"racoonci/internal/catalog"
-	"racoonci/internal/expr"
-	"racoonci/internal/platform"
-	"racoonci/internal/runnerimages"
-	"racoonci/internal/scan"
-	"racoonci/internal/value"
-	"racoonci/internal/workflow"
+	"raccoonci/internal/catalog"
+	"raccoonci/internal/expr"
+	"raccoonci/internal/platform"
+	"raccoonci/internal/runnerimages"
+	"raccoonci/internal/scan"
+	"raccoonci/internal/value"
+	"raccoonci/internal/workflow"
 )
 
 type Plan struct {
@@ -42,7 +42,7 @@ type Instance struct {
 
 	// OS is inferred from RunsOn; "" when the labels don't name one.
 	OS string
-	// UnavailableMsg is set when Racoon CI can't provide OS: what to tell
+	// UnavailableMsg is set when Raccoon CI can't provide OS: what to tell
 	// the user.
 	UnavailableMsg string
 
@@ -62,7 +62,7 @@ type Options struct {
 	Catalog *catalog.Catalog
 }
 
-// Unavailable reports whether the instance needs an OS Racoon CI can't
+// Unavailable reports whether the instance needs an OS Raccoon CI can't
 // provide. Per product decision such instances fail with a clear message
 // (or go to a user-connected machine); they are never skipped or moved to
 // another OS.

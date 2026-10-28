@@ -3,8 +3,8 @@ package plan
 import (
 	"testing"
 
-	"racoonci/internal/runnerimages"
-	"racoonci/internal/workflow"
+	"raccoonci/internal/runnerimages"
+	"raccoonci/internal/workflow"
 )
 
 func build(t *testing.T, src string) *Plan {

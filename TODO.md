@@ -1,6 +1,6 @@
-# Racoon CI 进度与待办
+# Raccoon CI 进度与待办
 
-更新于 2026-10-28。代码约 8400 行（不含测试），89 个测试函数，`make check` 全绿。
+更新于 2026-10-28。`make check` 全绿。
 
 图例：✅ 完成　🟡 部分完成　⬜ 未开始
 
@@ -11,12 +11,11 @@
 | # | 阶段 | 状态 | 说明 |
 |---|------|------|------|
 | 1 | workflow 解析 + matrix 展开 | ✅ | 含表达式求值 |
-| 2 | 依赖扫描器 | ✅ | 只"报告"，还没人用它去装东西（见 3.1） |
+| 2 | 依赖扫描器 | ✅ | |
 | 3 | 单机执行器 | 🟡 | `run:`、JS/composite action 可用；容器、Docker action、可复用 workflow 不支持 |
+| 3.5 | 装环境（按扫描结果安装） | 🟡 | Node.js、Go、Python、apt 包已通；Java、Ruby、Rust 和各种 CLI 工具还没有安装器（见 3.1） |
 | 4 | artifact v4 + cache v1 服务 | ⬜ | 实测 `upload-artifact` 报错，`cache` 静默不命中 |
 | 5 | InstaBox provider | ⬜ | |
-
-在 3 和 4 之间插入的"装环境"（按扫描结果安装依赖）也还没做，它是目前最大的缺口。
 
 ## 二、已完成
 
@@ -41,22 +40,34 @@
 - ✅ 安全：下载的压缩包无法写出目标目录；仓库读取限制在仓库内并限大小
 - ✅ CLI：`plan`、`run`、`catalog update`、`runner-images update`
 
-**真实环境实测过的**：`actions/setup-node@v4` 真实下载并运行；`runner-images update` 联网成功。其余网络相关代码只有假服务器测试。
+**装环境**（`internal/provision`、`internal/semver`）
+- ✅ 每个 job 启动前自动扫描并安装。作业用了 `node` 却没声明，就装镜像默认版本并放到 PATH 最前；声明了 `setup-node` 的，把 toolcache 预先填好，官方 action 直接命中缓存、不再下载
+- ✅ 安装器：Node.js（nodejs.org，支持 `lts/*`、`lts/iron`、`lts/-1`、`latest`）、Go（go.dev，支持 `stable`/`oldstable`）和 Python（python-build-standalone），下载校验 SHA-256，解压到私有目录再原子改名；并发的 job 共用一次下载；中断留下的半成品会被替换
+- ✅ **Python 在 Debian 上能用了**：实测 `setup-python` 在干净的 Debian 13 上直接失败（GitHub 的 Python 构建是给 Ubuntu 的）；把 Python 预先放进 toolcache 后它直接命中，`Successfully set up CPython (3.12.16)`。隐式用到的 `python3`（镜像默认 3.12.3，已不再发布）放宽到同一小版本的最新补丁；workflow 里显式写死的版本绝不偷换，而是给出明确提示
+- ✅ 版本规格：`20`、`20.x`、`>=18`、`^1.22`、`~1.2.3`、`1.2 - 1.4`、`||`；缓存里已有满足的版本就不联网（离线可用）
+- ✅ apt：`-install=all` 时用 sudo 安装缺少的包，Ubuntu→Debian 包名用 catalog 的 `debian:` 字段；一个包装不上不影响其余；默认不装，只报告
+- ✅ 装环境失败只给警告，不会让作业失败（扫描结果只是启发式）
+
+**真实环境实测过的**：`actions/setup-node@v4` 真实运行；`runner-images update` 联网成功；`setup-node` 输出 `Found in cache`，说明预填被官方 action 认可。在一台**全新的 InstaBox Debian 13 沙箱**（没有 go、make、gcc、tree、pip）上，一个没声明任何版本的 job 用 5 秒装好 node 22.23.3、go 1.24.13、make、gcc、tree 并通过；`setup-python@v5` 修复后通过。其余网络相关代码只有假服务器测试。
+
+**测试机**：为此建了一台 InstaBox 沙箱 `test-machine`（`m_EXAMPLE_MACHINE_ID`，已停止）。MCP 没有删除工具，**需要在控制台手动删除**。
 
 **文档**：`CLAUDE.md`（架构与约定）、`docs/gha-compat.md`（GHA 运行时依赖调研，参考 act / Gitea）
 
 ## 三、未完成
 
-### 3.1 装环境（provisioner）——最大缺口，下一步
+### 3.1 装环境——剩余部分
 
-扫描器能算出"这个 job 需要 node 22、jq、go 1.24"，但 `racoonci run` 完全没用这个结果，缺什么就直接失败。
+Node.js、Go、apt 包已经通了（见"已完成"）。还缺：
 
-- ⬜ 并行下载工具链，放进 toolcache 目录结构（`<tool>/<ver>/<arch>` + `.complete`），让 `setup-*` 直接命中
-- ⬜ apt 包安装，并用 catalog 里已有的 `debian:` 字段做 Ubuntu→Debian 包名映射（字段已有，代码还没用）
-- ⬜ Python：`setup-python` 下载的预编译包是为 Ubuntu 构建的，在 Debian 上能不能用**还没验证**；备选 python-build-standalone
+- 🟡 Python：最新一期 python-build-standalone 只含每个小版本的最新补丁，且已不含 3.10 及更早。工作流若显式写 `3.10` 或某个旧补丁，现在会得到明确报错而不是安装；要支持就得去翻更早的发布（要用 GitHub API，有 60 次/小时的限制）
+- ⬜ Java（Temurin）、Ruby、Rust 的安装器
+- ⬜ 各种 CLI 工具的安装器：docker、gh、kubectl、helm、terraform、yarn、maven 等。目前只检查是否已在 PATH 上，缺了就警告
+- ⬜ 其他架构：toolcache 的 arch 目录已按机器架构命名，但只在 x64 上实测过
 - ⬜ 第三方 action 内部的依赖：composite/docker action 要下载 `action.yml` 才能扫描（现在只扫 workflow 本身）
 - ⬜ 运行时兜底：命令返回 127（command not found）时记录并提示，下次自动补装
-- ⬜ 下载镜像配置（国内访问 GitHub / nodejs.org 慢）。用本地配置或环境变量，**不放进 catalog feed**
+- ⬜ 下载镜像配置（国内访问 GitHub / nodejs.org / go.dev 慢）。用本地配置或环境变量，**不放进 catalog feed**
+- ⬜ 工具链缓存清理（旧版本只增不减）。实测一套 node/go/python 就有 1GB，在 InstaBox 的 `/tmp`（2GB tmpfs）上会把盘占满，工具缓存应放在 `/data` 之类的持久盘上，并设上限
 
 ### 3.2 运行时服务（GHA action 依赖的内部接口）
 
@@ -117,6 +128,6 @@
 ## 四、工程与风险
 
 - ⬜ **git 提交**：上次提交（`59c4a82`）之后的 catalog 拉取与硬编码清理还没提交（工作区 20 项改动）
-- ⬜ 用 Racoon CI 自己跑自己的 `make check`（dogfood），同时也是第一个真实的端到端用例
+- ⬜ 用 Raccoon CI 自己跑自己的 `make check`（dogfood），同时也是第一个真实的端到端用例
 - ⬜ 兼容性语料：act 和 toolkit 的 workflow 文件**只验证了能解析**，整套跑起来的只有手写的小例子
 - 🟡 硬编码原则：evolving 的名单都已进 catalog；GitHub 协议本身（字段名、workflow 命令名、上限）和下载地址有意留在代码里，原因见 `CLAUDE.md`

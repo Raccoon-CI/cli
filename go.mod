@@ -1,4 +1,4 @@
-module racoonci
+module raccoonci
 
 go 1.27.1
 

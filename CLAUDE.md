@@ -4,14 +4,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-Racoon CI is a self-hosted CI/CD platform. Users move their workflows from GitHub Actions, Travis, CircleCI or Azure Pipelines onto compute they choose.
+Raccoon CI is a self-hosted CI/CD platform. Users move their workflows from GitHub Actions, Travis, CircleCI or Azure Pipelines onto compute they choose.
 
 - The MVP config format is GitHub Actions workflow YAML. Migrating from GitHub must be seamless and must not lose GHA features. A native config format may come later.
 - Compute providers are pluggable. Priority: the user's own machines, then InstaBox (first sandbox target), then Boat.dev, then cheap clouds (DigitalOcean/Linode). AWS/GCP are out of scope. Runners are Linux only for now, and InstaBox machines run Debian 13 (trixie), not Ubuntu, even for jobs that say `ubuntu-latest`. Windows may come later on InstaBox; macOS is too costly to host, so it is only reachable through users' own machines. The parser still accepts `macos-*`/`windows-*` labels, because migrated workflows contain them.
-- Racoon CI runs workflows with its own engine; it is not a GitHub self-hosted runner orchestrator (the user rejects paying two bills). It must reimplement the runtime services official actions call (artifact, cache, OIDC, job summary). See `docs/gha-compat.md` for what act and Gitea already do.
+- Raccoon CI runs workflows with its own engine; it is not a GitHub self-hosted runner orchestrator (the user rejects paying two bills). It must reimplement the runtime services official actions call (artifact, cache, OIDC, job summary). See `docs/gha-compat.md` for what act and Gitea already do.
 - Planned: AI agents that triage or fix failed runs.
 
-The code is a Go skeleton (module path `racoonci`). The Makefile and layout follow the sibling project `../release-manager`.
+The code is a Go skeleton (module path `raccoonci`). The Makefile and layout follow the sibling project `../release-manager`.
 
 ## Commands
 
@@ -33,15 +33,15 @@ make runner-images        # refresh the embedded snapshot of GitHub's Ubuntu run
 
 New binaries also need to be added to the `build` target in the Makefile.
 
-`racoonci plan <workflow.yml>` parses a workflow and prints its jobs, matrix combinations, each run's `runs-on`, what each run needs installed, and warnings for OSes we can't provide. Use it to sanity-check the parser, evaluator and scanner against real workflow files.
+`raccoonci plan <workflow.yml>` parses a workflow and prints its jobs, matrix combinations, each run's `runs-on`, what each run needs installed, and warnings for OSes we can't provide. Use it to sanity-check the parser, evaluator and scanner against real workflow files.
 
-`racoonci run [-job id] [-secret NAME] [-var K=V] [-workdir dir] <workflow.yml>` runs a workflow on this machine. Actions are downloaded from GitHub, Node.js runtimes from nodejs.org (both need network), and `actions/checkout` of the workflow's own repo copies the local working tree. Flags go before the workflow path.
+`raccoonci run [-job id] [-secret NAME] [-var K=V] [-install none|toolchains|all] [-workdir dir] <workflow.yml>` runs a workflow on this machine. Actions are downloaded from GitHub, Node.js runtimes from nodejs.org, toolchains from nodejs.org and go.dev (all need network), and `actions/checkout` of the workflow's own repo copies the local working tree. Flags go before the workflow path. Before each job, what it needs is scanned and installed (`-install`): `toolchains` (the default) only writes into the user cache dir; `all` also installs apt packages with sudo, so it is meant for machines Raccoon CI owns, not a developer's laptop.
 
-Catalog flags go before the command: `-catalog extra.yaml` overlays a local file, `-catalog-url https://…` (env `RACOONCI_CATALOG_URL`) pulls a feed, and `-catalog-key` (env `RACOONCI_CATALOG_KEY`) requires its ed25519 signature. `racoonci catalog update` refreshes the feed now.
+Catalog flags go before the command: `-catalog extra.yaml` overlays a local file, `-catalog-url https://…` (env `RACCOONCI_CATALOG_URL`) pulls a feed, and `-catalog-key` (env `RACCOONCI_CATALOG_KEY`) requires its ed25519 signature. `raccoonci catalog update` refreshes the feed now.
 
 ## Architecture
 
-Pipeline: `workflow.Parse` → `plan.Build` (evaluates what's knowable before the run, expands matrices, scans each instance's needs) → `engine.Run` (job graph) → `runner.Run` (one job instance). Still to come: the provisioner (installing scanned demands), the runtime-service servers (artifacts, cache), and the InstaBox provider.
+Pipeline: `workflow.Parse` → `plan.Build` (evaluates what's knowable before the run, expands matrices, scans each instance's needs) → `engine.Run` (job graph; per instance it scans, `provision.Ensure`s, then calls) → `runner.Run` (one job instance). Still to come: the runtime-service servers (artifacts, cache), and the InstaBox provider. See `TODO.md` for the full picture.
 
 **Knowledge that changes as tools evolve belongs in `internal/catalog/catalog.yaml`, not in Go code.** This covers:
 - which commands belong to which toolchain, tool or apt package
@@ -85,7 +85,15 @@ The catalog is layered: built-in, then a feed pulled from `-catalog-url` (cached
   - Opaque build commands (`make`, `./x.sh`) plus a repo manifest (`go.mod`, `package.json`, ...) imply that toolchain.
   - It warns about the catalog's `compat-warnings` (Ubuntu-only patterns such as `lsb_release` and PPAs) and YAML-float versions (`3.10` → `3.1`, with the affected versions listed per toolchain in the catalog).
   - Container jobs only need docker.
-  - Repo reads are size-capped. Pass an `os.OpenRoot` FS (as `racoonci plan` does) so symlinks can't escape the repo.
+  - Repo reads are size-capped. Pass an `os.OpenRoot` FS (as `raccoonci plan` does) so symlinks can't escape the repo.
+- `internal/provision`: installs a job instance's scanned demands before it runs, and never fails the job (everything that goes wrong comes back as a `Failed` item, which the engine shows as a warning, because the scan is only a heuristic).
+  - Toolchains go into the tool cache in toolkit's layout (`<tool>/<version>/<arch>` plus an `<arch>.complete` marker), so `setup-*` actions find them and download nothing. Like those actions, a cached version that satisfies the spec wins over asking the network, so offline works.
+  - Downloads are unpacked into a private dir, verified (SHA-256), then renamed into place. Concurrent jobs share one download.
+  - A toolchain the job uses *without* setting it up (an implicit demand) is also returned in `Result.PathDirs`, which the engine passes to `runner.Config.PrependPath`.
+  - The catalog picks an `Installer` by name (`installer: node`); the installers themselves (nodejs.org, go.dev, python-build-standalone) are code.
+  - **Python comes from python-build-standalone, not GitHub's builds.** GitHub's Python builds are for Ubuntu, and `setup-python` refuses to install them on Debian ("version … was not found for this operating system"; verified on a clean Debian 13). Prefilling the tool cache (`Python/<ver>/x64`) works because `setup-python` finds it there and never consults its manifest. That release only keeps the newest patch of each minor, so an *implicit* demand (the job just calls `python3`; the image has 3.12.3) is relaxed to the newest patch of the same minor, while a version the workflow *names* is never swapped (`Demand.Declared` marks an implicit demand that is also named later).
+  - Tools without an installer are only checked for. apt packages are installed through `Apt` (root or `sudo -n`; Debian names from the catalog's `debian:` field; one bad package doesn't block the rest), and only when the caller sets `Provisioner.Apt`.
+- `internal/semver`: npm-style version ranges as `setup-*` actions read them (`20`, `20.x`, `>=18`, `^1.22`, `1.2 - 1.4`, `||`). Pre-releases never match a range.
 - `internal/runner`: runs one job instance the way GitHub's runner does.
   - `run:` steps use GitHub's exact shell command lines. Unspecified shell is `bash -e`, explicit `bash` adds `--noprofile --norc -o pipefail`, and `python` falls back to `python3` on Debian.
   - Step conditions use the job's status. Composite actions have their own steps, inputs and `success()`.
@@ -104,8 +112,8 @@ The catalog is layered: built-in, then a feed pulled from `-catalog-url` (cached
   - Reusable workflows are not supported yet.
 - `internal/actions`: parses `action.yml`. Unknown keys are ignored, as GitHub does. It also downloads actions: through codeload without a token, through the API with one, and once per `Store`, because tags move.
 - `internal/archive`: tar.gz extraction through `os.Root`. Entries can't escape the destination via `..`, absolute paths, symlinks or hard links.
-- `internal/nodejs`: downloads the Node.js runtimes for JavaScript actions from nodejs.org and checks them against SHASUMS256. When offline, it uses an installed version.
-- `internal/local`: support code for `racoonci run`.
+- `internal/nodejs`: knows nodejs.org: the release index (`Index`) and verified downloads (`Fetch`). `Runtime` builds on them to provide the Node.js that JavaScript actions run on, and uses an installed version when offline; `provision` uses them to install the Node.js a job asks for.
+- `internal/local`: support code for `raccoonci run`.
   - Builds the github context from git.
   - Implements checkout by copying the working tree.
   - Renders the terminal output.

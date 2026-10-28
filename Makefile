@@ -5,7 +5,7 @@ LDFLAGS := -s -w -X main.version=$(VERSION)
 .PHONY: build test race vet check clean runner-images
 
 build:
-	$(GO) build -trimpath -ldflags "$(LDFLAGS)" -o dist/ ./cmd/racoonci
+	$(GO) build -trimpath -ldflags "$(LDFLAGS)" -o dist/ ./cmd/raccoonci
 
 test:
 	$(GO) test ./...
@@ -24,4 +24,4 @@ clean:
 
 # Refresh the embedded snapshot of what GitHub's Ubuntu runner images preinstall (needs network).
 runner-images:
-	$(GO) run ./cmd/racoonci runner-images update internal/runnerimages/snapshot
+	$(GO) run ./cmd/raccoonci runner-images update internal/runnerimages/snapshot
