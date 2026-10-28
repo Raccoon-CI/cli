@@ -51,6 +51,7 @@ func runWorkflow(args []string, cat *catalog.Catalog) (ok bool, err error) {
 	workDir := fs.String("workdir", "", "where jobs run (default: a new directory under the user cache dir)")
 	parallel := fs.Int("parallel", max(1, runtime.NumCPU()/2), "how many job runs at once")
 	debug := fs.Bool("debug", false, "show ::debug:: output")
+	cacheProtocol := fs.String("cache-protocol", "v1", "which actions/cache protocol to offer steps: v1 or v2 (both read and write the same entries)")
 	install := fs.String("install", "toolchains", "what to install for each job before it runs: none; toolchains (Node.js, Go... into the tool cache, which touches nothing else); or all (also apt packages, with sudo)")
 	fs.Usage = func() {
 		fmt.Fprintln(fs.Output(), "usage: raccoonci run [flags] <workflow.yml>")
@@ -62,6 +63,9 @@ func runWorkflow(args []string, cat *catalog.Catalog) (ok bool, err error) {
 		os.Exit(2)
 	}
 	path := fs.Arg(0)
+	if *cacheProtocol != "v1" && *cacheProtocol != "v2" {
+		return false, fmt.Errorf("-cache-protocol %q: want v1 or v2", *cacheProtocol)
+	}
 
 	src, err := os.ReadFile(path)
 	if err != nil {
@@ -150,7 +154,7 @@ func runWorkflow(args []string, cat *catalog.Catalog) (ok bool, err error) {
 	defer stop()
 	runID, _ := github.Get("run_id")
 	svcEnv, stopServices, err := localServices(filepath.Join(*workDir, "_artifacts"),
-		filepath.Join(cache, "actions-cache", repoDirName(repository.(string))), runID.(string))
+		filepath.Join(cache, "actions-cache", repoDirName(repository.(string))), runID.(string), *cacheProtocol == "v2")
 	if err != nil {
 		return false, fmt.Errorf("artifact service: %w", err)
 	}
@@ -233,7 +237,7 @@ func repoDirName(repository string) string {
 //
 // A cache that cannot start is reported and left out: jobs then run without
 // one, as actions/cache does when the service is missing.
-func localServices(artifactDir, cacheDir, runID string) (map[string]string, func(), error) {
+func localServices(artifactDir, cacheDir, runID string, cacheV2 bool) (map[string]string, func(), error) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return nil, nil, err
@@ -281,7 +285,7 @@ func localServices(artifactDir, cacheDir, runID string) (map[string]string, func
 	}
 	mux.Handle(blob.DownloadPrefix, artStore.Handler())
 
-	if cacheEnv, err := startCache(mux, &closers, base, cacheDir, key, signer, scope, tokenTTL); err != nil {
+	if cacheEnv, err := startCache(mux, &closers, base, cacheDir, key, signer, scope, tokenTTL, cacheV2); err != nil {
 		fmt.Fprintf(os.Stderr, "raccoonci: cache disabled: %v\n", err)
 	} else {
 		for k, v := range cacheEnv {
@@ -297,13 +301,13 @@ func localServices(artifactDir, cacheDir, runID string) (map[string]string, func
 }
 
 func startCache(mux *http.ServeMux, closers *[]func(), base, dir string, key []byte,
-	signer *artifact.Signer, scope artifact.Scope, ttl time.Duration) (map[string]string, error) {
+	signer *artifact.Signer, scope artifact.Scope, ttl time.Duration, v2 bool) (map[string]string, error) {
 	store, err := blob.NewDir(filepath.Join(dir, "objects"), base, key)
 	if err != nil {
 		return nil, err
 	}
 	store.Prefix = "/_cache_dl/"
-	svc, err := cache.New(cache.Config{Store: store, Signer: signer, BaseURL: base, IndexPath: filepath.Join(dir, "index.json")})
+	svc, err := cache.New(cache.Config{Store: store, Signer: signer, BaseURL: base, IndexPath: filepath.Join(dir, "index.json"), AdvertiseV2: v2})
 	if err != nil {
 		store.Close()
 		return nil, err
@@ -316,6 +320,6 @@ func startCache(mux *http.ServeMux, closers *[]func(), base, dir string, key []b
 	}
 	*closers = append(*closers, func() { store.Close() }, svc.Close)
 	mux.Handle(store.Prefix, store.Handler())
-	mux.Handle("/_apis/artifactcache/", svc.Handler())
+	svc.Routes(mux)
 	return env, nil
 }
