@@ -3,7 +3,6 @@ package plan
 import (
 	"testing"
 
-	"racoonci/internal/platform"
 	"racoonci/internal/runnerimages"
 	"racoonci/internal/workflow"
 )
@@ -35,12 +34,12 @@ jobs:
 	insts := p.Jobs[0].Instances
 	want := []struct {
 		runsOn      string
-		os          platform.OS
+		os          string
 		unavailable bool
 	}{
-		{"ubuntu-latest", platform.Linux, false},
-		{"macos-14", platform.MacOS, true},
-		{"windows-2022", platform.Windows, true},
+		{"ubuntu-latest", "linux", false},
+		{"macos-14", "macos", true},
+		{"windows-2022", "windows", true},
 	}
 	if len(insts) != len(want) {
 		t.Fatalf("got %d instances, want %d", len(insts), len(want))
@@ -123,7 +122,7 @@ jobs:
 	}
 	insts := p.Jobs[0].Instances
 	for i, label := range []string{"ubuntu-22.04", "ubuntu-latest"} {
-		want := images.ForLabel(label).Tools["node"]
+		want := images.ForLabel(nil, label).Tools["node"]
 		if n := insts[i].Needs; n == nil || len(n.Demands) != 1 || n.Demands[0].Version != want {
 			t.Errorf("%s: needs %+v, want node %s from that image", label, n, want)
 		}

@@ -41,7 +41,10 @@ type Instance struct {
 	RunsOnDeferred bool
 
 	// OS is inferred from RunsOn; "" when the labels don't name one.
-	OS platform.OS
+	OS string
+	// UnavailableMsg is set when Racoon CI can't provide OS: what to tell
+	// the user.
+	UnavailableMsg string
 
 	// Needs is what must be installed before the instance runs. It is nil
 	// for instances on an unavailable OS.
@@ -64,10 +67,13 @@ type Options struct {
 // (or go to a user-connected machine); they are never skipped or moved to
 // another OS.
 func (i *Instance) Unavailable() bool {
-	return i.OS != "" && !platform.Available(i.OS)
+	return i.UnavailableMsg != ""
 }
 
 func Build(w *workflow.Workflow, opts Options) (*Plan, error) {
+	if opts.Catalog == nil {
+		opts.Catalog = catalog.Default()
+	}
 	p := &Plan{}
 	for _, wj := range w.Jobs {
 		j, err := buildJob(w, wj, opts)
@@ -127,14 +133,17 @@ func buildJob(w *workflow.Workflow, wj *workflow.Job, opts Options) (*Job, error
 			return nil, fmt.Errorf("runs-on: %w", err)
 		}
 		if !inst.RunsOnDeferred {
-			inst.OS = platform.FromRunsOn(inst.RunsOn)
+			inst.OS = platform.FromRunsOn(opts.Catalog, inst.RunsOn)
+			if inst.OS != "" && !opts.Catalog.OSAvailable(inst.OS) {
+				inst.UnavailableMsg = opts.Catalog.OSUnavailable(inst.OS)
+			}
 		}
 		if !inst.Unavailable() {
 			inst.Needs = scan.Job(scan.Input{
 				Workflow: w,
 				Job:      wj,
 				Context:  ctx,
-				Image:    imageFor(inst, opts.Images),
+				Image:    imageFor(opts.Catalog, inst, opts.Images),
 				Repo:     opts.Repo,
 				Catalog:  opts.Catalog,
 			})
@@ -145,12 +154,12 @@ func buildJob(w *workflow.Workflow, wj *workflow.Job, opts Options) (*Job, error
 }
 
 // imageFor returns the GitHub image the instance's runs-on names, if any.
-func imageFor(inst *Instance, images *runnerimages.Snapshot) *runnerimages.Defaults {
+func imageFor(cat *catalog.Catalog, inst *Instance, images *runnerimages.Snapshot) *runnerimages.Defaults {
 	if images == nil || inst.RunsOnDeferred {
 		return nil
 	}
 	for _, l := range platform.Labels(inst.RunsOn) {
-		if d := images.ForLabel(l); d != nil {
+		if d := images.ForLabel(cat, l); d != nil {
 			return d
 		}
 	}
