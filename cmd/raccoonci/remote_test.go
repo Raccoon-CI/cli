@@ -1,7 +1,12 @@
 package main
 
 import (
+	"archive/tar"
+	"compress/gzip"
+	"io"
+	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"raccoonci/internal/catalog"
 	"raccoonci/internal/engine"
@@ -106,5 +111,131 @@ func TestSplitRemote(t *testing.T) {
 	}
 	if _, _, err := splitRemote([]string{"-on"}); err == nil {
 		t.Error("a flag with no value was accepted")
+	}
+}
+
+func tarNames(t *testing.T, repo string) map[string]bool {
+	t.Helper()
+	p, err := makeSourceTar(repo, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Open(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	zr, err := gzip.NewReader(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := map[string]bool{}
+	tr := tar.NewReader(zr)
+	for {
+		h, err := tr.Next()
+		if err == io.EOF {
+			return names
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		names[strings.TrimSuffix(h.Name, "/")] = true
+	}
+}
+
+// The source package leaves out what git ignores (a clone on GitHub has none
+// of it) but keeps .git, tracked files, and new files not yet committed.
+func TestSourceTarLeavesOutIgnoredFiles(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("no git")
+	}
+	repo := t.TempDir()
+	git := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-C", repo, "-c", "user.name=t", "-c", "user.email=t@t"}, args...)...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	write := func(name, content string) {
+		t.Helper()
+		p := filepath.Join(repo, name)
+		os.MkdirAll(filepath.Dir(p), 0o755)
+		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	git("init", "-q")
+	write(".gitignore", "node_modules/\n*.log\n")
+	write("main.go", "package main\n")
+	git("add", "-A")
+	git("commit", "-q", "-m", "init")
+	write("node_modules/x/index.js", "x")
+	write("deep/build.log", "log")
+	write("new.go", "package main\n") // not committed, not ignored
+
+	names := tarNames(t, repo)
+	for _, want := range []string{"src/main.go", "src/.gitignore", "src/new.go", "src/.git/HEAD"} {
+		if !names[want] {
+			t.Errorf("%s is missing from the package", want)
+		}
+	}
+	for _, bad := range []string{"src/node_modules", "src/node_modules/x/index.js", "src/deep/build.log"} {
+		if names[bad] {
+			t.Errorf("%s should have been left out", bad)
+		}
+	}
+}
+
+// Outside a git checkout nothing is left out.
+func TestSourceTarWithoutGitKeepsEverything(t *testing.T) {
+	repo := t.TempDir()
+	os.MkdirAll(filepath.Join(repo, "node_modules"), 0o755)
+	os.WriteFile(filepath.Join(repo, "node_modules", "a.js"), []byte("x"), 0o644)
+	if !tarNames(t, repo)["src/node_modules/a.js"] {
+		t.Error("a tree that is not a git checkout lost files")
+	}
+}
+
+// Each instance sent to a machine gets a token of its own: it may create
+// artifacts as its own job only, and it is not the token of the local run.
+func TestEachInstanceGetsATokenForItsOwnJob(t *testing.T) {
+	dir := t.TempDir()
+	svc, err := localServices(filepath.Join(dir, "art"), filepath.Join(dir, "cache"), "run1", false, 0, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer svc.stop()
+
+	envA, err := svc.jobEnv("build-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	envB, _ := svc.jobEnv("build-2")
+	tokA, tokB := envA["ACTIONS_RUNTIME_TOKEN"], envB["ACTIONS_RUNTIME_TOKEN"]
+	if tokA == "" || tokA == tokB || tokA == svc.env["ACTIONS_RUNTIME_TOKEN"] {
+		t.Fatalf("tokens are not distinct: %q %q %q", tokA, tokB, svc.env["ACTIONS_RUNTIME_TOKEN"])
+	}
+	if envA["ACTIONS_RESULTS_URL"] != svc.env["ACTIONS_RESULTS_URL"] || envA["ACTIONS_CACHE_URL"] != svc.env["ACTIONS_CACHE_URL"] {
+		t.Error("the service addresses changed")
+	}
+
+	create := func(tok, job string) int {
+		body := `{"workflow_run_backend_id":"run1","workflow_job_run_backend_id":"` + job + `","name":"a","version":4}`
+		req, _ := http.NewRequest("POST", svc.base+"/twirp/github.actions.results.api.v1.ArtifactService/CreateArtifact", strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+tok)
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+	if code := create(tokA, "build-1"); code != 200 {
+		t.Errorf("a job creating its own artifact: %d", code)
+	}
+	if code := create(tokA, "build-2"); code == 200 {
+		t.Error("a token created an artifact for another job")
 	}
 }

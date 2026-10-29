@@ -11,6 +11,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -102,9 +103,11 @@ type remoteRun struct {
 	vars      value.Object
 	inputs    value.Object
 	secrets   map[string]string
-	env       map[string]string // what steps need to reach the artifact and cache services
-	install   string
-	event     func(runner.Event)
+	// jobEnv is what steps need to reach the artifact and cache services,
+	// with a token for the job id given.
+	jobEnv  func(job string) (map[string]string, error)
+	install string
+	event   func(runner.Event)
 
 	prefix string
 	n      atomic.Int32
@@ -211,8 +214,14 @@ func (rr *remoteRun) run(ctx context.Context, inst engine.RemoteInstance) (runne
 	if err != nil {
 		return runner.Result{}, err
 	}
+	// Each instance gets a token of its own. The id is unique per instance (a
+	// matrix has many with one job id) and uses only what a token may hold.
+	svcEnv, err := rr.jobEnv(fmt.Sprintf("%s-%d", inst.Job.ID, rr.n.Add(1)))
+	if err != nil {
+		return runner.Result{}, err
+	}
 	input, err := json.Marshal(instanceSpec{Workflow: rr.workflow, Job: inst.Job.ID, Contexts: contexts,
-		ServiceEnv: rr.env, Install: rr.install})
+		ServiceEnv: svcEnv, Install: rr.install})
 	if err != nil {
 		return runner.Result{}, err
 	}
@@ -279,6 +288,24 @@ func orEmptyObject(o value.Object) value.Object {
 }
 
 // makeSourceTar archives repo into a file under dir.
+// ignoredBy returns a filter for the files git ignores in repo (node_modules,
+// build output, local config): a clone on GitHub does not have them, and they
+// can be most of the tree. The .git directory stays, so steps that run git
+// work. When repo is not a git checkout or git is missing, nothing is skipped.
+func ignoredBy(repo string) func(rel string, isDir bool) bool {
+	out, err := exec.Command("git", "-C", repo, "ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--directory").Output()
+	if err != nil {
+		return nil
+	}
+	ignored := map[string]bool{}
+	for _, p := range strings.Split(string(out), "\x00") {
+		if p != "" {
+			ignored[strings.TrimSuffix(p, "/")] = true
+		}
+	}
+	return func(rel string, isDir bool) bool { return ignored[rel] }
+}
+
 func makeSourceTar(repo, dir string) (string, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", err
@@ -289,7 +316,7 @@ func makeSourceTar(repo, dir string) (string, error) {
 		return "", err
 	}
 	defer f.Close()
-	if err := dispatch.TarDir(f, repo); err != nil {
+	if err := dispatch.TarDirSkipping(f, repo, ignoredBy(repo)); err != nil {
 		return "", err
 	}
 	return p, f.Close()

@@ -206,7 +206,7 @@ func runWorkflow(args []string, cat *catalog.Catalog, remote *remoteFlags) (ok b
 	defer svc.stop()
 	var remoteFn func(context.Context, engine.RemoteInstance) (runner.Result, error)
 	if rr != nil {
-		rr.env = svc.env
+		rr.jobEnv = svc.jobEnv
 		remoteFn = rr.run
 	}
 
@@ -298,7 +298,11 @@ type services struct {
 	handler http.Handler
 	base    string            // the loopback address, http://127.0.0.1:port
 	env     map[string]string // points steps on the host at base
-	stop    func()
+	// jobEnv is env with a token of its own for the job id given, for a run
+	// that sends jobs to machines: a leaked token then opens one job's
+	// uploads, not the whole run's.
+	jobEnv func(job string) (map[string]string, error)
+	stop   func()
 }
 
 // publicServe makes localServices serve for machines elsewhere: on a chosen
@@ -393,7 +397,16 @@ func localServices(artifactDir, cacheDir, runID string, cacheV2 bool, cacheLimit
 	})
 	srv := &http.Server{Handler: handler, ReadHeaderTimeout: 30 * time.Second}
 	go srv.Serve(ln)
-	return &services{handler: handler, base: base, env: env, stop: func() { srv.Close(); closeAll() }}, nil
+	jobEnv := func(job string) (map[string]string, error) {
+		tok, err := signer.Token(artifact.Scope{Run: runID, Job: job}, tokenTTL)
+		if err != nil {
+			return nil, err
+		}
+		e := maps.Clone(env)
+		e["ACTIONS_RUNTIME_TOKEN"] = tok // the artifact and cache services share one token format
+		return e, nil
+	}
+	return &services{handler: handler, base: base, env: env, jobEnv: jobEnv, stop: func() { srv.Close(); closeAll() }}, nil
 }
 
 // serveNetwork also serves on a docker network's gateway, for a job

@@ -34,6 +34,8 @@ commands:
   run [flags] <workflow.yml>         run a workflow on this machine (raccoonci run -h for flags)
   agent [flags]                      on a machine a controller sends jobs to: wait for
                                      ~/.raccoonci-agent.json, run the job it names
+  runner-snapshot [flags]            build the InstaBox snapshot that run -on instabox starts
+                                     machines from (needs an API key)
   catalog update                     pull the catalog feed now (needs -catalog-url)
   runner-images update <dir>         fetch what GitHub's Ubuntu runner images preinstall into
                                      snapshot files (uses GITHUB_TOKEN for the API fallback if set)
@@ -94,6 +96,8 @@ func main() {
 		}
 	case len(args) >= 1 && args[0] == "run-instance": // started by the agent
 		err = runInstance(args[1:], cat)
+	case len(args) >= 1 && args[0] == "runner-snapshot":
+		err = runnerSnapshot(args[1:])
 	case len(args) >= 1 && args[0] == "agent":
 		err = runAgent(args[1:])
 	case len(args) == 3 && args[0] == "runner-images" && args[1] == "update":
