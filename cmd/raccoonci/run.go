@@ -290,7 +290,8 @@ func localServices(artifactDir, cacheDir, runID string, cacheV2 bool) (*services
 		return nil, err
 	}
 	closers = append(closers, func() { artStore.Close() })
-	artSvc, err := artifact.New(artifact.Config{Store: artStore, Signer: signer, BaseURL: base})
+	artSvc, err := artifact.New(artifact.Config{Store: artStore, Signer: signer, BaseURL: base,
+		SpoolDir: filepath.Join(artifactDir, "spool")})
 	if err != nil {
 		closeAll()
 		return nil, err
@@ -313,9 +314,12 @@ func localServices(artifactDir, cacheDir, runID string, cacheV2 bool) (*services
 
 	// Only the artifact routes sit at "/"; the cache has its own prefix.
 	mux.Handle("/", artSvc.Handler())
-	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 30 * time.Second}
+	handler := local.LogServerErrors(mux, func(format string, a ...any) {
+		fmt.Fprintf(os.Stderr, "raccoonci: artifact/cache service: "+format+"\n", a...)
+	})
+	srv := &http.Server{Handler: handler, ReadHeaderTimeout: 30 * time.Second}
 	go srv.Serve(ln)
-	return &services{handler: mux, base: base, env: env, stop: func() { srv.Close(); closeAll() }}, nil
+	return &services{handler: handler, base: base, env: env, stop: func() { srv.Close(); closeAll() }}, nil
 }
 
 // serveNetwork also serves on a docker network's gateway, for a job
@@ -350,7 +354,9 @@ func startCache(mux *http.ServeMux, closers *[]func(), base, dir string, key []b
 		return nil, err
 	}
 	store.Prefix = "/_cache_dl/"
-	svc, err := cache.New(cache.Config{Store: store, Signer: signer, BaseURL: base, IndexPath: filepath.Join(dir, "index.json"), AdvertiseV2: v2})
+	// Chunks wait next to the store, not in /tmp: a Go build cache alone is a gigabyte.
+	svc, err := cache.New(cache.Config{Store: store, Signer: signer, BaseURL: base, IndexPath: filepath.Join(dir, "index.json"),
+		SpoolDir: filepath.Join(dir, "spool"), AdvertiseV2: v2})
 	if err != nil {
 		store.Close()
 		return nil, err
