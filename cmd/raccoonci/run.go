@@ -34,6 +34,7 @@ import (
 	"raccoonci/internal/provision"
 	"raccoonci/internal/runner"
 	"raccoonci/internal/runnerimages"
+	"raccoonci/internal/trigger"
 	"raccoonci/internal/value"
 	"raccoonci/internal/workflow"
 )
@@ -59,6 +60,9 @@ func runWorkflow(args []string, cat *catalog.Catalog, remote *remoteFlags) (ok b
 	debug := fs.Bool("debug", false, "show ::debug:: output")
 	cacheProtocol := fs.String("cache-protocol", "v1", "which actions/cache protocol to offer steps: v1 or v2 (both read and write the same entries)")
 	cacheLimitGB := fs.Int("cache-limit-gb", 10, "the most the cache of a repository may hold, in GiB (GitHub allows 10); the least recently used entries are evicted first; 0 means no limit")
+	var evFlags eventFlags
+	evFlags.register(fs, false)
+	onlyIfTriggered := fs.Bool("only-if-triggered", false, "run nothing unless the workflow's on: (branches, tags, paths, types) is triggered by the event, described by -event, -ref, -base-ref, -file ...; by default `run` assumes it is")
 	var s3f cacheS3Flags
 	s3f.register(fs)
 	envSnapshots := fs.Int("env-snapshots", 0, "with -on: keep up to this many environment snapshots per repository: after a successful run, a machine whose job installed dependencies (all lockfiles pinned) is saved, and later runs with the same lockfiles start from it; 0 turns it off")
@@ -111,6 +115,27 @@ func runWorkflow(args []string, cat *catalog.Catalog, remote *remoteFlags) (ok b
 	inputObj, err := keyValues("-input", inputs)
 	if err != nil {
 		return false, err
+	}
+	if *event == "workflow_dispatch" {
+		// As on GitHub: declared defaults fill in, required inputs must be
+		// given, choices are checked, and booleans and numbers are typed.
+		given := map[string]string{}
+		for _, f := range inputObj {
+			given[f.Key] = f.Value.(string)
+		}
+		if inputObj, err = trigger.DispatchInputs(w.On, given); err != nil {
+			return false, fmt.Errorf("%s: %w", path, err)
+		}
+	}
+	if *onlyIfTriggered {
+		res, err := trigger.Match(w.On, evFlags.event(repo, *event))
+		if err != nil {
+			return false, fmt.Errorf("%s: %w", path, err)
+		}
+		if !res.Triggered {
+			fmt.Printf("%s is not triggered by this event: %s\n", path, res.Reason)
+			return true, nil
+		}
 	}
 
 	installHere := *install

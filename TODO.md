@@ -100,7 +100,7 @@ Node.js、Go、Python、Java、Rust、apt 包已经通了（见"已完成"和下
 
 ### 3.4 workflow 语义缺口
 
-- ⬜ `on:` 触发匹配：branches/paths/tags 过滤、`schedule`、`workflow_dispatch` 输入校验、`workflow_call`。现在 `run` 只是假设事件发生了
+- ✅ `on:` 触发匹配（2026-10-29，`internal/trigger`）：事件写法三种（字符串、列表、映射）；`push`/`pull_request`/`pull_request_target` 的 `branches`、`branches-ignore`、`tags`、`tags-ignore`、`paths`、`paths-ignore` 按 GitHub 的规则——过滤用的是 GitHub 自己的 glob（`*` 不跨 `/`，`**` 跨，`**/x` 也匹配根目录的 x，`?` `+` 作用于前一个字符，`[]` 字符集，`\` 转义），列表里 `!` 取反且顺序有意义（后面的正向模式可以重新选中），只有取反模式的列表报错；只写了 branches 时推 tag 不触发、只写了 tags 时推分支不触发；PR 的 branches 过滤看目标分支；tag 推送不看 paths；`paths` 与 `paths-ignore`、`branches` 与 `branches-ignore`、`tags` 与 `tags-ignore` 同时出现是错误；`types`（`pull_request` 默认 opened/synchronize/reopened，其它事件不写 types 就全部）；`schedule` 校验 cron 是 5 段并按字符串匹配触发的那条；`workflow_dispatch` 的 `inputs` 解析（默认值、required、choice 的 options、boolean/number 的类型转换、不认识的输入报错——`run -event workflow_dispatch -input k=v` 现在走这条，`inputs.x` 因此是带类型的，和 GitHub 一致）。文档里的过滤示例做成了测试，80 个真实 workflow 全部能解析。命令行：`raccoonci match -event E [-ref R -base-ref B -before REV -file F -action A -cron C] workflow.yml`（退出码 1 表示不触发；变更文件默认取 git 的 `HEAD~1..HEAD`，PR 取 `base...HEAD`，取不到就是"未知"，paths 过滤不拦），`run -only-if-triggered` 同样判断后才跑（默认 `run` 仍然假设触发，因为是用户明确要跑）。**还没做**：`workflow_call`（可复用 workflow，见下）；`workflow_run`、`merge_group` 的 `workflows`/`branches` 过滤；push 事件按 GitHub 的"最多 300 个文件就总是触发"；`schedule` 的 cron 到点计算（服务端要做）；把 `match` 的事件从 webhook 载荷里取（服务端）
 - ⬜ `concurrency`（group / cancel-in-progress）
 - ⬜ `permissions` 和 `environment`（含保护规则、环境级 secrets）
 - ⬜ `run-name`

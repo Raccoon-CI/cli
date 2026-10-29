@@ -34,6 +34,9 @@ commands:
                                      parse a workflow and list its jobs, matrix combinations
                                      and what each run needs installed; -fetch-actions
                                      downloads third-party actions to look inside them
+  match [flags] <workflow.yml>       say whether an event (push to a branch, a pull request,
+                                     changed files...) triggers the workflow's on:
+                                     (exit status 1 if not)
   run [flags] <workflow.yml>         run a workflow on this machine (raccoonci run -h for flags)
   agent [flags]                      on a machine a controller sends jobs to: wait for
                                      ~/.raccoonci-agent.json, run the job it names
@@ -97,6 +100,11 @@ func main() {
 			ok, err = runWorkflow(args[1:], cat, nil)
 		}
 		if err == nil && !ok {
+			os.Exit(1)
+		}
+	case len(args) >= 1 && args[0] == "match":
+		var ok bool
+		if ok, err = matchWorkflow(os.Stdout, args[1:]); err == nil && !ok {
 			os.Exit(1)
 		}
 	case len(args) >= 1 && args[0] == "run-instance": // started by the agent
