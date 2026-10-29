@@ -201,7 +201,7 @@ func TestSourceTarWithoutGitKeepsEverything(t *testing.T) {
 // artifacts as its own job only, and it is not the token of the local run.
 func TestEachInstanceGetsATokenForItsOwnJob(t *testing.T) {
 	dir := t.TempDir()
-	svc, err := localServices(filepath.Join(dir, "art"), filepath.Join(dir, "cache"), "run1", false, 0, nil)
+	svc, err := localServices(filepath.Join(dir, "art"), filepath.Join(dir, "cache"), "run1", false, 0, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

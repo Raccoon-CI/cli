@@ -59,6 +59,8 @@ func runWorkflow(args []string, cat *catalog.Catalog, remote *remoteFlags) (ok b
 	debug := fs.Bool("debug", false, "show ::debug:: output")
 	cacheProtocol := fs.String("cache-protocol", "v1", "which actions/cache protocol to offer steps: v1 or v2 (both read and write the same entries)")
 	cacheLimitGB := fs.Int("cache-limit-gb", 10, "the most the cache of a repository may hold, in GiB (GitHub allows 10); the least recently used entries are evicted first; 0 means no limit")
+	var s3f cacheS3Flags
+	s3f.register(fs)
 	envSnapshots := fs.Int("env-snapshots", 0, "with -on: keep up to this many environment snapshots per repository: after a successful run, a machine whose job installed dependencies (all lockfiles pinned) is saved, and later runs with the same lockfiles start from it; 0 turns it off")
 	toolCacheLimitGB := fs.Int("toolcache-limit-gb", 10, "the most the tool cache (Node.js, Go, Python... installed for jobs) may hold, in GiB; before a run, the versions used longest ago go first, but none used in the last 24 hours; 0 means no limit")
 	install := fs.String("install", "toolchains", "what to install for each job before it runs: none; toolchains (Node.js, Go... into the tool cache, which touches nothing else); or all (also apt packages, with sudo)")
@@ -209,8 +211,12 @@ func runWorkflow(args []string, cat *catalog.Catalog, remote *remoteFlags) (ok b
 			return false, fmt.Errorf("packing the source: %w", err)
 		}
 	}
+	cacheBucket, err := s3f.store(repoDirName(repository.(string)))
+	if err != nil {
+		return false, err
+	}
 	svc, err := localServices(filepath.Join(*workDir, "_artifacts"),
-		filepath.Join(cache, "actions-cache", repoDirName(repository.(string))), runID.(string), *cacheProtocol == "v2", int64(*cacheLimitGB)<<30, serve)
+		filepath.Join(cache, "actions-cache", repoDirName(repository.(string))), runID.(string), *cacheProtocol == "v2", int64(*cacheLimitGB)<<30, serve, cacheBucket)
 	if err != nil {
 		return false, fmt.Errorf("artifact service: %w", err)
 	}
@@ -332,7 +338,7 @@ type publicServe struct {
 //
 // A cache that cannot start is reported and left out: jobs then run without
 // one, as actions/cache does when the service is missing.
-func localServices(artifactDir, cacheDir, runID string, cacheV2 bool, cacheLimit int64, serve *publicServe) (*services, error) {
+func localServices(artifactDir, cacheDir, runID string, cacheV2 bool, cacheLimit int64, serve *publicServe, cacheBucket blob.Store) (*services, error) {
 	listen := "127.0.0.1:0"
 	if serve != nil {
 		listen = serve.listen
@@ -388,7 +394,7 @@ func localServices(artifactDir, cacheDir, runID string, cacheV2 bool, cacheLimit
 	}
 	mux.Handle(blob.DownloadPrefix, artStore.Handler())
 
-	if cacheEnv, err := startCache(mux, &closers, base, cacheDir, key, signer, scope, tokenTTL, cacheV2, cacheLimit); err != nil {
+	if cacheEnv, err := startCache(mux, &closers, base, cacheDir, key, signer, scope, tokenTTL, cacheV2, cacheLimit, cacheBucket); err != nil {
 		fmt.Fprintf(os.Stderr, "raccoonci: cache disabled: %v\n", err)
 	} else {
 		for k, v := range cacheEnv {
@@ -456,29 +462,39 @@ func freeBytes(dir string) func() (int64, error) {
 	}
 }
 
+// startCache serves the cache protocols. Entries live in bucket if one is
+// given, else in a directory under dir that this process serves itself.
 func startCache(mux *http.ServeMux, closers *[]func(), base, dir string, key []byte,
-	signer *artifact.Signer, scope artifact.Scope, ttl time.Duration, v2 bool, limit int64) (map[string]string, error) {
-	store, err := blob.NewDir(filepath.Join(dir, "objects"), base, key)
-	if err != nil {
-		return nil, err
+	signer *artifact.Signer, scope artifact.Scope, ttl time.Duration, v2 bool, limit int64, bucket blob.Store) (map[string]string, error) {
+	var store blob.Store
+	free := freeBytes(dir)
+	if bucket != nil {
+		// The bucket has no disk of ours to run out of; chunks still wait in
+		// dir/spool until they are cut into parts.
+		store, free = bucket, nil
+	} else {
+		d, err := blob.NewDir(filepath.Join(dir, "objects"), base, key)
+		if err != nil {
+			return nil, err
+		}
+		d.Prefix = "/_cache_dl/"
+		store = d
+		*closers = append(*closers, func() { d.Close() })
+		mux.Handle(d.Prefix, d.Handler())
 	}
-	store.Prefix = "/_cache_dl/"
 	// Chunks wait next to the store, not in /tmp: a Go build cache alone is a gigabyte.
 	svc, err := cache.New(cache.Config{Store: store, Signer: signer, BaseURL: base, IndexPath: filepath.Join(dir, "index.json"),
 		SpoolDir: filepath.Join(dir, "spool"), AdvertiseV2: v2,
-		MaxBytes: limit, Free: freeBytes(dir)})
+		MaxBytes: limit, Free: free})
 	if err != nil {
-		store.Close()
 		return nil, err
 	}
 	env, err := svc.Env(scope, ttl)
 	if err != nil {
 		svc.Close()
-		store.Close()
 		return nil, err
 	}
-	*closers = append(*closers, func() { store.Close() }, svc.Close)
-	mux.Handle(store.Prefix, store.Handler())
+	*closers = append(*closers, svc.Close)
 	svc.Routes(mux)
 	return env, nil
 }
