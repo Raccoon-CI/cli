@@ -65,6 +65,7 @@ Node.js、Go、apt 包已经通了（见"已完成"）。还缺：
 - ⬜ 各种 CLI 工具的安装器：docker、gh、kubectl、helm、terraform、yarn、maven 等。目前只检查是否已在 PATH 上，缺了就警告
 - ✅ 采用机器自带的工具链：InstaBox 的 `universal` 模板自带 Go、Node 等。装环境前先按 catalog 的 `probe`（运行什么命令、从输出哪一段取版本号）探测，版本满足就把安装目录链接进 toolcache，不再下载。运行时探测，不写死模板里有什么。实测：全新缓存目录下跑自己的 CI，`go 1.27.1 (already on this machine)`，`setup-go` 直接 Found in cache。目前只给 node 和 go 配了 probe；Python 不采用系统版本（`setup-python` 要的布局不同），其余工具链（Rust、Java 等）还没有安装器也没有 probe
 - 🟡 项目环境快照（装完依赖拍快照，锁文件不变就复用）：键和登记表已做（`internal/envsnap`）。键 = 锁文件内容哈希 + 用到的工具链名 + 机器镜像标识，不含工具链版本；`plan` 会显示每个实例能否快照。真实项目上：cobra/本项目（go.sum）、commander.js（package-lock.json）、click（uv.lock）可以；express 没有锁文件，判定为不能快照。**还没接**：真正拍快照和从快照启动要等 InstaBox provider；只允许可信分支产生快照（fork PR 只能读），拍快照的机器上不能有机密；多个子目录各有锁文件的 monorepo 目前只看仓库根；创建快照后的淘汰（Index 的上限）要由 provider 去真正删除快照，而 MCP 没有删快照的工具
+- ✅ 通用 runner 快照（InstaBox）：`universal` 模板（Debian 13）+ 静态编译的 `raccoonci`（`/usr/local/bin`）+ 清单 `/etc/raccoonci-runner.json`，不含工具链、依赖、机密、登录信息。做法：新建一台干净的 `universal`，临时用 `instabox-port serve` 发布只含二进制的目录（随机路径），机器上下载并校验 SHA-256 后立刻撤下端口，检查母机无凭据文件后拍快照。实测：从快照建机器约 9.5 s，在上面用快照里的 `raccoonci` 跑 checkout + `setup-go` + `setup-node` + 运行步骤，7.2 s 成功，Go 和 Node 都直接采用机器自带的版本。这次验证还发现并修了一个真问题：模板把 Go 和 Node 装在同一个 `/usr/local/bin`，采用时不能把整个前缀链接进某个工具链的目录，否则会把别的工具带上 PATH，盖掉前面步骤选的版本（已修，见 `sharesPrefix`）。**更新方式还是手工的**（每次新版本要重做快照）；要有自动化，并在快照清单里校验 `raccoonci` 版本和模板版本
 - ⬜ 其他架构：toolcache 的 arch 目录已按机器架构命名，但只在 x64 上实测过
 - ⬜ 第三方 action 内部的依赖：composite/docker action 要下载 `action.yml` 才能扫描（现在只扫 workflow 本身）
 - ⬜ 运行时兜底：命令返回 127（command not found）时记录并提示，下次自动补装
