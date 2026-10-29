@@ -13,7 +13,7 @@
 | 1 | workflow 解析 + matrix 展开 | ✅ | 含表达式求值 |
 | 2 | 依赖扫描器 | ✅ | |
 | 3 | 单机执行器 | 🟡 | `run:`、JS/composite action、容器 job 和 `services:` 可用；Docker action、可复用 workflow 不支持 |
-| 3.5 | 装环境（按扫描结果安装） | 🟡 | Node.js、Go、Python、apt 包已通；Java、Ruby、Rust 和各种 CLI 工具还没有安装器（见 3.1） |
+| 3.5 | 装环境（按扫描结果安装） | 🟡 | Node.js、Go、Python、Java、Rust、apt 包已通；Ruby 和各种 CLI 工具还没有安装器（见 3.1） |
 | 4 | artifact v4 + cache v1/v2 服务 | ✅ | 两者在本机运行里都用真实 action 实测通过；v3 REST、持久化/淘汰等见 3.2 |
 | 5 | InstaBox provider | ⬜ | |
 
