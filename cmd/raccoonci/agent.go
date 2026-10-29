@@ -10,6 +10,8 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
+	"sync"
 	"time"
 
 	"raccoonci/internal/dispatch"
@@ -22,17 +24,26 @@ type agentConfig struct {
 }
 
 // runAgent implements `raccoonci agent`: wait for the config file, then run
-// the one job it names and exit. The token is read from a file, never from the
-// command line, where other users of the machine could see it.
+// the one job it names and exit. With -loop it keeps going: after a job the
+// config file is gone and the agent waits for the next one, in -slots places at
+// once (slot i reads the file dispatch.SlotConfig names), so a machine can run
+// several short jobs one after another and side by side. The token is read from
+// a file, never from the command line, where other users of the machine could
+// see it.
 func runAgent(args []string) error {
 	fs := flag.NewFlagSet("agent", flag.ExitOnError)
 	config := fs.String("config", "/data/home/.raccoonci-agent.json", "the file holding the controller `url` and `token` (JSON)")
 	wait := fs.Duration("wait", 10*time.Minute, "how long to wait for the file to appear")
 	dir := fs.String("dir", "", "where the source is unpacked (default: a new temporary directory)")
+	loop := fs.Bool("loop", false, "keep taking jobs: wait for a new config file after each one, until stopped")
+	slots := fs.Int("slots", 0, "with -loop: how many jobs at once (default: the number of CPUs, at most 8)")
 	fs.Parse(args)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
+	if *loop {
+		return agentLoop(ctx, *config, *slots, *wait)
+	}
 
 	cfg, err := waitForConfig(ctx, *config, *wait)
 	if err != nil {
@@ -50,6 +61,63 @@ func runAgent(args []string) error {
 	}
 	return (&dispatch.Agent{URL: cfg.URL, Token: cfg.Token, Dir: *dir, Exe: exe}).Run(ctx)
 }
+
+// maxSlots caps how many jobs a looping agent runs at once.
+const maxSlots = 8
+
+// agentLoop runs one goroutine per slot; each takes a job at a time from its
+// own config file. It returns when ctx ends.
+func agentLoop(ctx context.Context, config string, slots int, wait time.Duration) error {
+	if slots <= 0 {
+		slots = min(runtime.NumCPU(), maxSlots)
+	}
+	slots = min(slots, maxSlots)
+	exe, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	var wg sync.WaitGroup
+	for i := 0; i < slots; i++ {
+		wg.Add(1)
+		go func(path string) {
+			defer wg.Done()
+			for ctx.Err() == nil {
+				if err := agentOnce(ctx, path, exe, wait); err != nil && ctx.Err() == nil {
+					fmt.Fprintf(os.Stderr, "raccoonci agent: %v\n", err)
+					select {
+					case <-ctx.Done():
+					case <-time.After(2 * time.Second):
+					}
+				}
+			}
+		}(dispatch.SlotConfig(config, i))
+	}
+	wg.Wait()
+	return nil
+}
+
+// agentOnce waits for the config at path, deletes it (so a token is never
+// read twice, and is not left on a disk that gets a snapshot), and runs the
+// job in a directory of its own.
+func agentOnce(ctx context.Context, path, exe string, wait time.Duration) error {
+	cfg, err := waitForConfig(ctx, path, wait)
+	if err != nil {
+		if errors.Is(err, errConfigTimeout) {
+			return nil // nothing came; wait again
+		}
+		os.Remove(path) // unreadable or incomplete: do not read it again
+		return err
+	}
+	os.Remove(path)
+	dir, err := os.MkdirTemp("", "raccoonci-agent-")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(dir)
+	return (&dispatch.Agent{URL: cfg.URL, Token: cfg.Token, Dir: dir, Exe: exe}).Run(ctx)
+}
+
+var errConfigTimeout = errors.New("no config appeared")
 
 // waitForConfig polls for the file: the machine may boot before the
 // controller has uploaded it.
@@ -73,12 +141,12 @@ func waitForConfig(ctx context.Context, path string, wait time.Duration) (agentC
 			return agentConfig{}, err
 		}
 		if time.Now().After(deadline) {
-			return agentConfig{}, fmt.Errorf("%s did not appear within %v", filepath.Clean(path), wait)
+			return agentConfig{}, fmt.Errorf("%s did not appear within %v: %w", filepath.Clean(path), wait, errConfigTimeout)
 		}
 		select {
 		case <-ctx.Done():
 			return agentConfig{}, ctx.Err()
-		case <-time.After(time.Second):
+		case <-time.After(200 * time.Millisecond):
 		}
 	}
 }

@@ -34,6 +34,7 @@ import (
 	"raccoonci/internal/provision"
 	"raccoonci/internal/runner"
 	"raccoonci/internal/runnerimages"
+	"raccoonci/internal/sched"
 	"raccoonci/internal/trigger"
 	"raccoonci/internal/value"
 	"raccoonci/internal/workflow"
@@ -68,6 +69,8 @@ func runWorkflow(args []string, cat *catalog.Catalog, remote *remoteFlags) (ok b
 	usageFile := fs.String("usage-file", "", "with -on: write what each machine used (when it was requested, ready and deleted, its size) to this file, one JSON object per line; money is worked out from it, not stored")
 	var s3f cacheS3Flags
 	s3f.register(fs)
+	noPack := fs.Bool("no-pack", false, "with -on: give every job instance a machine of its own, even those that took only seconds in earlier runs")
+	packSlots := fs.Int("pack-slots", 0, "with -on: how many short job instances share a machine at once (default: its number of vCPUs; 1 runs them one after another)")
 	envSnapshots := fs.Int("env-snapshots", 0, "with -on: keep up to this many environment snapshots per repository: after a successful run, a machine whose job installed dependencies (all lockfiles pinned) is saved, and later runs with the same lockfiles start from it; 0 turns it off")
 	toolCacheLimitGB := fs.Int("toolcache-limit-gb", 10, "the most the tool cache (Node.js, Go, Python... installed for jobs) may hold, in GiB; before a run, the versions used longest ago go first, but none used in the last 24 hours; 0 means no limit")
 	install := fs.String("install", "toolchains", "what to install for each job before it runs: none; toolchains (Node.js, Go... into the tool cache, which touches nothing else); or all (also apt packages, with sudo)")
@@ -234,6 +237,16 @@ func runWorkflow(args []string, cat *catalog.Catalog, remote *remoteFlags) (ok b
 		rr.workflow, rr.github, rr.vars, rr.inputs = filepath.ToSlash(rel), github, varObj, inputObj
 		rr.secrets, rr.install, rr.event = secretValues, *install, printer.Event
 		defer rr.provider.Wait() // snapshots being saved and machines being deleted
+		if !*noPack {
+			histDir := filepath.Join(cache, "sched")
+			hist, err := sched.OpenHistory(filepath.Join(histDir, repoDirName(repository.(string))+".json"))
+			if err != nil {
+				return false, err
+			}
+			rr.pool = &instabox.Pool{P: rr.provider, Slots: *packSlots, Prefix: rr.prefix + "p"}
+			rr.policy = &sched.Policy{History: hist, Startup: rr.provider.StartupTime}
+			defer rr.pool.Close()
+		}
 		if *envSnapshots > 0 {
 			idxDir := filepath.Join(cache, "envsnap")
 			if err := os.MkdirAll(idxDir, 0o755); err != nil {
@@ -301,6 +314,9 @@ func runWorkflow(args []string, cat *catalog.Catalog, remote *remoteFlags) (ok b
 	// housekeeping a user need not wait for, and a benchmark must not count.
 	fmt.Fprintf(os.Stderr, "raccoonci: results ready after %.1f s\n", time.Since(processStart).Seconds())
 	if rr != nil {
+		if rr.pool != nil {
+			rr.pool.Close()
+		}
 		rr.provider.Wait() // snapshots being saved and machines being deleted
 		reportUsage(rr.provider.Usage(), *usageFile)
 	}

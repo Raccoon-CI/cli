@@ -49,6 +49,9 @@ type wireLine struct {
 type wireResult struct {
 	Conclusion runner.Conclusion `json:"conclusion"`
 	Outputs    json.RawMessage   `json:"outputs"`
+	// DurationMS is how long the job took on the machine, from provisioning
+	// to its last step: what the scheduler weighs against a machine's start-up.
+	DurationMS int64 `json:"duration_ms,omitempty"`
 }
 
 // runInstance implements `raccoonci run-instance`, which the agent starts in
@@ -119,10 +122,11 @@ func runInstance(args []string, cat *catalog.Catalog) error {
 	}
 	defer repoDir.Close()
 
-	workDir := filepath.Join(rt.cacheDir, "runs", time.Now().Format("20060102-150405"))
+	workDir := filepath.Join(rt.cacheDir, "runs", fmt.Sprintf("%s-%d", time.Now().Format("20060102-150405"), os.Getpid()))
 	enc := &lineEncoder{out: os.Stdout}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	began := time.Now()
 	res := engine.RunInstance(ctx, w, engine.Options{
 		Github:    github,
 		Secrets:   secretValues,
@@ -150,7 +154,7 @@ func runInstance(args []string, cat *catalog.Catalog) error {
 	if err != nil {
 		return err
 	}
-	enc.write(wireLine{Result: &wireResult{Conclusion: res.Conclusion, Outputs: outputs}})
+	enc.write(wireLine{Result: &wireResult{Conclusion: res.Conclusion, Outputs: outputs, DurationMS: time.Since(began).Milliseconds()}})
 	return nil
 }
 
@@ -221,6 +225,16 @@ func (r *wireReader) line(b []byte) {
 	if len(b) > 0 {
 		r.event(runner.Event{Kind: runner.Output, Time: time.Now(), Job: r.name, Text: string(b)})
 	}
+}
+
+// Duration is how long the job took on the machine, if it said.
+func (r *wireReader) Duration() (time.Duration, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.result == nil || r.result.DurationMS <= 0 {
+		return 0, false
+	}
+	return time.Duration(r.result.DurationMS) * time.Millisecond, true
 }
 
 // Result is the instance's final result, if the machine sent one.

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -148,39 +149,86 @@ func TestOpenRejectsACorruptIndex(t *testing.T) {
 	}
 }
 
-// Compute reads the repo root only for lockfiles, so dependencies that live in
-// a subdirectory would not be in the key: a change there would reuse a stale
-// snapshot. Such a repo must not be snapshotted.
-func TestSubdirectoryDependenciesMakeTheProjectUnsnapshottable(t *testing.T) {
-	root := fstest.MapFS{
-		"go.mod": {Data: []byte("module x\n")}, "go.sum": {Data: []byte("s\n")},
-	}
-	if _, err := key(t, root, "b", "go", "node"); err != nil {
-		t.Fatalf("a root-only repo should work: %v", err)
-	}
-	for _, sub := range []string{"web/package.json", "web/package-lock.json", "tools/go.mod", "a/b/Cargo.lock"} {
-		repo := fstest.MapFS{}
-		for k, v := range root {
-			repo[k] = v
+// Dependencies in a subdirectory are part of the key: its lockfile is hashed
+// under its path, so a change there gives a new key, and a project in a
+// subdirectory no longer rules the repository out.
+func TestSubdirectoryProjectsAreInTheKey(t *testing.T) {
+	repo := func(webLock string) fstest.MapFS {
+		return fstest.MapFS{
+			"go.mod": {Data: []byte("module x\n")}, "go.sum": {Data: []byte("s\n")},
+			"web/package.json":      {Data: []byte("{}")},
+			"web/package-lock.json": {Data: []byte(webLock)},
 		}
+	}
+	a, err := key(t, repo("1"), "b", "go", "node")
+	if err != nil {
+		t.Fatalf("a pinned subdirectory project should work: %v", err)
+	}
+	var files []string
+	for _, p := range a.Parts {
+		files = append(files, p.File)
+	}
+	if !slices.Equal(files, []string{"go.sum", "web/package-lock.json"}) {
+		t.Errorf("parts = %v", files)
+	}
+	if b, _ := key(t, repo("2"), "b", "go", "node"); b.Hash == a.Hash {
+		t.Error("a changed lockfile in a subdirectory kept the key")
+	}
+	if c, _ := key(t, repo("1"), "b", "go", "node"); c.Hash != a.Hash {
+		t.Error("the same files gave another key")
+	}
+	// The same lockfile moved to another directory is another environment.
+	moved := fstest.MapFS{
+		"go.mod": {Data: []byte("module x\n")}, "go.sum": {Data: []byte("s\n")},
+		"app/package.json":      {Data: []byte("{}")},
+		"app/package-lock.json": {Data: []byte("1")},
+	}
+	if m, _ := key(t, moved, "b", "go", "node"); m.Hash == a.Hash {
+		t.Error("the path is not in the key")
+	}
+}
+
+func TestSubdirectoryProjectsNeedTheirOwnLockfile(t *testing.T) {
+	base := func() fstest.MapFS {
+		return fstest.MapFS{"go.mod": {Data: []byte("module x\n")}, "go.sum": {Data: []byte("s\n")}}
+	}
+	for _, sub := range []string{"web/package.json", "tools/go.mod", "a/b/Cargo.toml"} {
+		repo := base()
 		repo[sub] = &fstest.MapFile{Data: []byte("{}")}
-		_, err := key(t, repo, "b", "go", "node", "rust")
-		if !errors.Is(err, ErrUnpinned) {
+		if _, err := key(t, repo, "b", "go", "node", "rust"); !errors.Is(err, ErrUnpinned) {
 			t.Errorf("%s: err = %v, want ErrUnpinned", sub, err)
 		}
 	}
-	// Directories that hold installed or vendored code are not the project's own.
-	repo := fstest.MapFS{
-		"go.mod": root["go.mod"], "go.sum": root["go.sum"],
+	// A lockfile in the root does not pin a manifest below it.
+	repo := base()
+	repo["package-lock.json"] = &fstest.MapFile{Data: []byte("{}")}
+	repo["web/package.json"] = &fstest.MapFile{Data: []byte("{}")}
+	if _, err := key(t, repo, "b", "go", "node"); !errors.Is(err, ErrUnpinned) {
+		t.Errorf("manifest below a root lockfile: err = %v, want ErrUnpinned", err)
+	}
+	// A lockfile with no manifest beside it is still a lockfile to hash.
+	repo = base()
+	repo["web/package-lock.json"] = &fstest.MapFile{Data: []byte("{}")}
+	if _, err := key(t, repo, "b", "go", "node"); err != nil {
+		t.Errorf("lockfile alone: %v", err)
+	}
+	// Installed or vendored code is not the project's own.
+	repo = fstest.MapFS{
+		"go.mod": base()["go.mod"], "go.sum": base()["go.sum"],
 		"node_modules/x/package.json": {Data: []byte("{}")},
 		".git/config":                 {Data: []byte("")},
 	}
 	if _, err := key(t, repo, "b", "go", "node"); err != nil {
 		t.Errorf("node_modules must be ignored: %v", err)
 	}
-	// A subdirectory for a toolchain the job does not use does not matter.
-	repo = fstest.MapFS{"go.mod": root["go.mod"], "go.sum": root["go.sum"], "web/package.json": {Data: []byte("{}")}}
+	// A toolchain the job does not use does not matter.
+	repo = base()
+	repo["web/package.json"] = &fstest.MapFile{Data: []byte("{}")}
 	if _, err := key(t, repo, "b", "go"); err != nil {
 		t.Errorf("unused toolchain's subdirectory: %v", err)
+	}
+	// A project with a manifest and no dependencies at all has nothing to snapshot.
+	if _, err := key(t, fstest.MapFS{"x/go.sum": {Data: []byte("")}}, "b", "node"); !errors.Is(err, ErrNothingToSnapshot) {
+		t.Errorf("err = %v, want ErrNothingToSnapshot", err)
 	}
 }

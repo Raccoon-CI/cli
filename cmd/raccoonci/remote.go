@@ -16,6 +16,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"raccoonci/internal/catalog"
 	"raccoonci/internal/dispatch"
@@ -23,6 +24,7 @@ import (
 	"raccoonci/internal/envsnap"
 	"raccoonci/internal/instabox"
 	"raccoonci/internal/runner"
+	"raccoonci/internal/sched"
 	"raccoonci/internal/value"
 )
 
@@ -69,7 +71,7 @@ func splitRemote(args []string) (rf remoteFlags, rest []string, err error) {
 // take the word after one for its value. Keep it in step with run.go.
 func isBool(flagName string) bool {
 	switch flagName {
-	case "debug", "affected", "only-if-triggered", "cache-s3-path-style":
+	case "debug", "affected", "only-if-triggered", "cache-s3-path-style", "no-pack":
 		return true
 	}
 	return false
@@ -150,6 +152,31 @@ type remoteRun struct {
 	trusted bool // the event comes from the repository's own code, not a fork's
 	mu      sync.Mutex
 	claimed map[string]bool // keys being snapshotted now: one machine per key does it
+
+	// Packing: pool is nil when it is off. Instances the policy calls short
+	// share the pool's machines; the others get a machine of their own.
+	pool   *instabox.Pool
+	policy *sched.Policy
+}
+
+// packable says whether the instance may share a machine, and why not
+// otherwise. Jobs with containers or services start docker networks, and
+// publish ports on the machine, which a neighbour's would collide with.
+func (rr *remoteRun) packable(inst engine.RemoteInstance, key string) (bool, string) {
+	if rr.pool == nil || rr.policy == nil {
+		return false, ""
+	}
+	if inst.Job.Container != nil || inst.Job.Services != nil {
+		return false, "uses containers or services"
+	}
+	short, est, limit := rr.policy.Short(key)
+	if !short {
+		if est > 0 {
+			return false, fmt.Sprintf("took %v, not under %v", est.Round(100*time.Millisecond), limit.Round(time.Second))
+		}
+		return false, "no history yet"
+	}
+	return true, fmt.Sprintf("took %v, under %v", est.Round(100*time.Millisecond), limit.Round(time.Second))
 }
 
 func (rr *remoteRun) say(format string, args ...any) {
@@ -274,6 +301,19 @@ func (rr *remoteRun) run(ctx context.Context, inst engine.RemoteInstance) (runne
 		Log: reader,
 	}
 	key, from := rr.restore(inst)
+	histKey := sched.Key(rr.workflow, inst.Name)
+	if ok, why := rr.packable(inst, histKey); rr.pool != nil {
+		switch {
+		case ok && key == "":
+			rr.say("%s: shares a machine (%s)", inst.Name, why)
+			res, err := rr.pool.Run(ctx, job)
+			return rr.finish(histKey, reader, res, err)
+		case ok:
+			rr.say("%s: gets a machine of its own (it can use an environment snapshot)", inst.Name)
+		case why != "":
+			rr.say("%s: gets a machine of its own (%s)", inst.Name, why)
+		}
+	}
 	attempt := func(from string) (dispatch.Result, error) {
 		opts := &instabox.RunOptions{From: from}
 		if key != "" && from == "" {
@@ -294,6 +334,12 @@ func (rr *remoteRun) run(ctx context.Context, inst engine.RemoteInstance) (runne
 		rr.snaps.Remove(key)
 		res, err = attempt("")
 	}
+	return rr.finish(histKey, reader, res, err)
+}
+
+// finish turns what the machine reported into the instance's result, and
+// remembers how long a successful job took there.
+func (rr *remoteRun) finish(histKey string, reader *wireReader, res dispatch.Result, err error) (runner.Result, error) {
 	if err != nil {
 		return runner.Result{}, err
 	}
@@ -307,6 +353,11 @@ func (rr *remoteRun) run(ctx context.Context, inst engine.RemoteInstance) (runne
 		return runner.Result{}, fmt.Errorf("the machine's result: %w", err)
 	case !ok:
 		return runner.Result{}, fmt.Errorf("the machine exited with status %d without a result (its output is above)", res.ExitCode)
+	}
+	if d, ok := reader.Duration(); ok && out.Conclusion == runner.Success && rr.policy != nil {
+		if err := rr.policy.History.Record(histKey, d); err != nil {
+			rr.say("could not save the job's duration: %v", err)
+		}
 	}
 	return out, nil
 }

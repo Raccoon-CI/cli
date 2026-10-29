@@ -211,3 +211,72 @@ jobs:
 		t.Errorf("a failing job reported success:\n%s", log)
 	}
 }
+
+// A looping agent takes one job per config file, deletes the file when it
+// reads it (so a token is not read twice or left on a disk that is
+// snapshotted), and is ready for the next file at once.
+func TestAgentOnceTakesJobsOneAfterAnother(t *testing.T) {
+	exe := filepath.Join(t.TempDir(), "raccoonci")
+	if err := os.WriteFile(exe, []byte("#!/bin/sh\necho ran-$1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	src := t.TempDir()
+	os.WriteFile(filepath.Join(src, "f"), []byte("x"), 0o644)
+
+	c := &dispatch.Controller{}
+	srv := httptest.NewServer(c.Handler())
+	defer srv.Close()
+	cfgPath := filepath.Join(t.TempDir(), "agent.json")
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	for _, cmd := range []string{"run", "run-instance"} {
+		var log lockedBuf
+		run, err := c.Submit(dispatch.Job{Command: cmd, Log: &log,
+			Source: func(w io.Writer) error { return dispatch.TarDir(w, src) }})
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, _ := json.Marshal(agentConfig{URL: srv.URL, Token: run.Token})
+		if err := os.WriteFile(cfgPath, b, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := agentOnce(ctx, cfgPath, exe, time.Minute); err != nil {
+			t.Fatalf("%s: %v", cmd, err)
+		}
+		res, err := run.Wait(ctx)
+		if err != nil || res.ExitCode != 0 {
+			t.Fatalf("%s: res = %+v, err = %v", cmd, res, err)
+		}
+		if !strings.Contains(log.String(), "ran-"+cmd) {
+			t.Errorf("%s: log = %q", cmd, log.String())
+		}
+		if _, err := os.Stat(cfgPath); !os.IsNotExist(err) {
+			t.Errorf("%s: the config file is still there (%v)", cmd, err)
+		}
+		c.Forget(run)
+	}
+}
+
+// Nothing arriving is not an error: the slot just waits again.
+func TestAgentOnceWithNoConfigReturnsNil(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := agentOnce(ctx, filepath.Join(t.TempDir(), "none.json"), "/bin/true", 300*time.Millisecond); err != nil {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+// A config that cannot be read is removed and reported, not read again.
+func TestAgentOnceDropsABadConfig(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "agent.json")
+	os.WriteFile(p, []byte(`{"url":"","token":""}`), 0o600)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := agentOnce(ctx, p, "/bin/true", time.Second); err == nil {
+		t.Fatal("a config without url and token was accepted")
+	}
+	if _, err := os.Stat(p); !os.IsNotExist(err) {
+		t.Errorf("the bad config was left (%v)", err)
+	}
+}
