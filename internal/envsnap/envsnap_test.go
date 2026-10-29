@@ -188,6 +188,50 @@ func TestSubdirectoryProjectsAreInTheKey(t *testing.T) {
 	}
 }
 
+// The members of a workspace have no lockfile of their own: the root's covers
+// them, so the project can be snapshotted, and the key follows that lockfile.
+func TestWorkspaceMembersAreLockedByTheRootLockfile(t *testing.T) {
+	npm := func(lock string) fstest.MapFS {
+		return fstest.MapFS{
+			"package.json":             {Data: []byte(`{"name":"root","workspaces":["packages/*"]}`)},
+			"package-lock.json":        {Data: []byte(lock)},
+			"packages/a/package.json":  {Data: []byte(`{"name":"a"}`)},
+			"packages/b/package.json":  {Data: []byte(`{"name":"b","dependencies":{"a":"*"}}`)},
+			"tools/other/package.json": {Data: []byte(`{"name":"other"}`)}, // not a member
+		}
+	}
+	// With a package that is not a member, nothing says its dependencies are locked.
+	if _, err := key(t, npm("1"), "b", "node"); !errors.Is(err, ErrUnpinned) {
+		t.Errorf("a non-member below the root lockfile: err = %v, want ErrUnpinned", err)
+	}
+	repo := npm("1")
+	delete(repo, "tools/other/package.json")
+	k1, err := key(t, repo, "b", "node")
+	if err != nil {
+		t.Fatalf("workspace members: %v", err)
+	}
+	repo2 := npm("2")
+	delete(repo2, "tools/other/package.json")
+	if k2, _ := key(t, repo2, "b", "node"); k2.Hash == k1.Hash {
+		t.Error("a changed root lockfile did not change the key")
+	}
+
+	cargo := fstest.MapFS{
+		"Cargo.toml":             {Data: []byte("[workspace]\nmembers = [\"crates/*\"]\n")},
+		"Cargo.lock":             {Data: []byte("x")},
+		"crates/a/Cargo.toml":    {Data: []byte("[package]\nname = \"a\"\n")},
+		"crates/b/Cargo.toml":    {Data: []byte("[package]\nname = \"b\"\n")},
+		"vendorish/z/Cargo.toml": {Data: []byte("[package]\nname = \"z\"\n")},
+	}
+	if _, err := key(t, cargo, "b", "rust"); !errors.Is(err, ErrUnpinned) {
+		t.Errorf("a crate outside the workspace: err = %v, want ErrUnpinned", err)
+	}
+	delete(cargo, "vendorish/z/Cargo.toml")
+	if _, err := key(t, cargo, "b", "rust"); err != nil {
+		t.Errorf("workspace crates: %v", err)
+	}
+}
+
 func TestSubdirectoryProjectsNeedTheirOwnLockfile(t *testing.T) {
 	base := func() fstest.MapFS {
 		return fstest.MapFS{"go.mod": {Data: []byte("module x\n")}, "go.sum": {Data: []byte("s\n")}}

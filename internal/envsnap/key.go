@@ -28,6 +28,7 @@ import (
 	"slices"
 	"strings"
 
+	"raccoonci/internal/affected"
 	"raccoonci/internal/catalog"
 )
 
@@ -70,8 +71,10 @@ type Key struct {
 // the root. A manifest with no lockfile beside it is not pinned (ErrUnpinned),
 // wherever it is. The key covers all projects of the toolchain, not only the
 // ones the job works in: that can rebuild a snapshot more often than needed
-// but never reuses a stale one. A lockfile of an ancestor directory (npm
-// workspaces) does not pin a member's manifest: nothing says it is a member.
+// but never reuses a stale one. A lockfile of an ancestor directory pins a
+// manifest only if the manifest is a member of a workspace (npm, pnpm, yarn,
+// Cargo), whose one lockfile covers its members; otherwise nothing says the
+// two belong together.
 //
 // Toolchain versions are not part of the key. Toolchains come from the machine
 // or are installed on demand; the snapshot is for what they install.
@@ -85,13 +88,22 @@ func Compute(repo fs.FS, cat *catalog.Catalog, base string, toolchains []string)
 		return Key{}, err
 	}
 
+	var members map[string]map[string]bool // toolchain -> workspace member dirs, found when first needed
 	var parts []Part
 	for _, name := range names {
 		dirs := projects[name]
 		for _, dir := range slices.Sorted(maps.Keys(dirs)) {
 			pr := dirs[dir]
 			if len(pr.locks) == 0 {
-				// A manifest and nothing that says when its dependencies change.
+				// A manifest and nothing that says when its dependencies change,
+				// unless it is a member of a workspace whose lockfile, in a
+				// directory above, covers all its members.
+				if members == nil {
+					members = workspaceMembers(repo)
+				}
+				if members[name][dir] && lockedAbove(dirs, dir) {
+					continue
+				}
 				return Key{}, fmt.Errorf("%w: %s has %s but no lockfile", ErrUnpinned, cat.Title(name), path.Join(dir, pr.manifests[0]))
 			}
 			for _, f := range pr.locks {
@@ -119,6 +131,41 @@ func Compute(repo fs.FS, cat *catalog.Catalog, base string, toolchains []string)
 		fmt.Fprintf(h, "%s\t%s\t%s\n", p.Toolchain, p.File, p.SHA256)
 	}
 	return Key{Hash: hex.EncodeToString(h.Sum(nil)), Parts: parts}, nil
+}
+
+// workspaceKinds maps the package kinds package affected finds to the
+// catalog's toolchain names.
+var workspaceKinds = map[string]string{"npm": "node", "cargo": "rust"}
+
+// workspaceMembers lists, per toolchain, the directories that are members of a
+// workspace of the repository (npm, pnpm and yarn workspaces, Cargo's). Their
+// dependencies are locked by the workspace's one lockfile.
+func workspaceMembers(repo fs.FS) map[string]map[string]bool {
+	out := map[string]map[string]bool{}
+	for _, p := range affected.Packages(repo) {
+		tc, ok := workspaceKinds[p.Kind]
+		if !ok {
+			continue
+		}
+		if out[tc] == nil {
+			out[tc] = map[string]bool{}
+		}
+		out[tc][p.Dir] = true
+	}
+	return out
+}
+
+// lockedAbove reports whether a directory above dir holds a lockfile of the
+// toolchain (dirs are its projects).
+func lockedAbove(dirs map[string]*project, dir string) bool {
+	for d := path.Dir(dir); ; d = path.Dir(d) {
+		if pr := dirs[d]; pr != nil && len(pr.locks) > 0 {
+			return true
+		}
+		if d == "." {
+			return false
+		}
+	}
 }
 
 // project is what one directory holds of one toolchain.
