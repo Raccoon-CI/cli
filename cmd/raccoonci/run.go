@@ -54,6 +54,7 @@ func runWorkflow(args []string, cat *catalog.Catalog) (ok bool, err error) {
 	parallel := fs.Int("parallel", max(1, runtime.NumCPU()/2), "how many job runs at once")
 	debug := fs.Bool("debug", false, "show ::debug:: output")
 	cacheProtocol := fs.String("cache-protocol", "v1", "which actions/cache protocol to offer steps: v1 or v2 (both read and write the same entries)")
+	cacheLimitGB := fs.Int("cache-limit-gb", 10, "the most the cache of a repository may hold, in GiB (GitHub allows 10); the least recently used entries are evicted first; 0 means no limit")
 	install := fs.String("install", "toolchains", "what to install for each job before it runs: none; toolchains (Node.js, Go... into the tool cache, which touches nothing else); or all (also apt packages, with sudo)")
 	fs.Usage = func() {
 		fmt.Fprintln(fs.Output(), "usage: raccoonci run [flags] <workflow.yml>")
@@ -160,7 +161,7 @@ func runWorkflow(args []string, cat *catalog.Catalog) (ok bool, err error) {
 	defer stop()
 	runID, _ := github.Get("run_id")
 	svc, err := localServices(filepath.Join(*workDir, "_artifacts"),
-		filepath.Join(cache, "actions-cache", repoDirName(repository.(string))), runID.(string), *cacheProtocol == "v2")
+		filepath.Join(cache, "actions-cache", repoDirName(repository.(string))), runID.(string), *cacheProtocol == "v2", int64(*cacheLimitGB)<<30)
 	if err != nil {
 		return false, fmt.Errorf("artifact service: %w", err)
 	}
@@ -255,7 +256,7 @@ type services struct {
 //
 // A cache that cannot start is reported and left out: jobs then run without
 // one, as actions/cache does when the service is missing.
-func localServices(artifactDir, cacheDir, runID string, cacheV2 bool) (*services, error) {
+func localServices(artifactDir, cacheDir, runID string, cacheV2 bool, cacheLimit int64) (*services, error) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return nil, err
@@ -304,7 +305,7 @@ func localServices(artifactDir, cacheDir, runID string, cacheV2 bool) (*services
 	}
 	mux.Handle(blob.DownloadPrefix, artStore.Handler())
 
-	if cacheEnv, err := startCache(mux, &closers, base, cacheDir, key, signer, scope, tokenTTL, cacheV2); err != nil {
+	if cacheEnv, err := startCache(mux, &closers, base, cacheDir, key, signer, scope, tokenTTL, cacheV2, cacheLimit); err != nil {
 		fmt.Fprintf(os.Stderr, "raccoonci: cache disabled: %v\n", err)
 	} else {
 		for k, v := range cacheEnv {
@@ -347,8 +348,19 @@ func (s *services) serveNetwork(gateway netip.Addr, subnet netip.Prefix) (map[st
 	return env, func() { srv.Close() }, nil
 }
 
+// freeBytes reports the space available to us on the disk holding dir.
+func freeBytes(dir string) func() (int64, error) {
+	return func() (int64, error) {
+		var st syscall.Statfs_t
+		if err := syscall.Statfs(dir, &st); err != nil {
+			return 0, err
+		}
+		return int64(st.Bavail) * int64(st.Bsize), nil
+	}
+}
+
 func startCache(mux *http.ServeMux, closers *[]func(), base, dir string, key []byte,
-	signer *artifact.Signer, scope artifact.Scope, ttl time.Duration, v2 bool) (map[string]string, error) {
+	signer *artifact.Signer, scope artifact.Scope, ttl time.Duration, v2 bool, limit int64) (map[string]string, error) {
 	store, err := blob.NewDir(filepath.Join(dir, "objects"), base, key)
 	if err != nil {
 		return nil, err
@@ -356,7 +368,8 @@ func startCache(mux *http.ServeMux, closers *[]func(), base, dir string, key []b
 	store.Prefix = "/_cache_dl/"
 	// Chunks wait next to the store, not in /tmp: a Go build cache alone is a gigabyte.
 	svc, err := cache.New(cache.Config{Store: store, Signer: signer, BaseURL: base, IndexPath: filepath.Join(dir, "index.json"),
-		SpoolDir: filepath.Join(dir, "spool"), AdvertiseV2: v2})
+		SpoolDir: filepath.Join(dir, "spool"), AdvertiseV2: v2,
+		MaxBytes: limit, Free: freeBytes(dir)})
 	if err != nil {
 		store.Close()
 		return nil, err
