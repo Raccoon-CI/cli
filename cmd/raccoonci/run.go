@@ -63,6 +63,7 @@ func runWorkflow(args []string, cat *catalog.Catalog, remote *remoteFlags) (ok b
 	var evFlags eventFlags
 	evFlags.register(fs, false)
 	onlyIfTriggered := fs.Bool("only-if-triggered", false, "run nothing unless the workflow's on: (branches, tags, paths, types) is triggered by the event, described by -event, -ref, -base-ref, -file ...; by default `run` assumes it is")
+	onlyAffected := fs.Bool("affected", false, "leave out the jobs the changed files do not concern (see `raccoonci affected`); the changes come from git, or -file/-before")
 	var s3f cacheS3Flags
 	s3f.register(fs)
 	envSnapshots := fs.Int("env-snapshots", 0, "with -on: keep up to this many environment snapshots per repository: after a successful run, a machine whose job installed dependencies (all lockfiles pinned) is saved, and later runs with the same lockfiles start from it; 0 turns it off")
@@ -195,6 +196,18 @@ func runWorkflow(args []string, cat *catalog.Catalog, remote *remoteFlags) (ok b
 	}
 	defer repoDir.Close()
 
+	var unaffectedFn func(*workflow.Job) (string, bool)
+	if *onlyAffected {
+		wfRel, err := filepath.Rel(repo, absPath(path))
+		if err != nil || strings.HasPrefix(wfRel, "..") {
+			return false, fmt.Errorf("%s is outside its repository %s", path, repo)
+		}
+		ev := evFlags.event(repo, *event)
+		if unaffectedFn, err = unaffected(w, repoDir.FS(), filepath.ToSlash(wfRel), ev.Files); err != nil {
+			return false, err
+		}
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	runID, _ := github.Get("run_id")
@@ -255,6 +268,7 @@ func runWorkflow(args []string, cat *catalog.Catalog, remote *remoteFlags) (ok b
 	fmt.Printf("running %s in %s\n", path, *workDir)
 	res, err := engine.Run(ctx, w, engine.Options{
 		Remote:      remoteFn,
+		Unaffected:  unaffectedFn,
 		Github:      github,
 		Secrets:     secretValues,
 		Vars:        varObj,
@@ -286,6 +300,10 @@ func runWorkflow(args []string, cat *catalog.Catalog, remote *remoteFlags) (ok b
 	}
 	fmt.Println()
 	for _, j := range res.Jobs {
+		if j.Unchanged != "" {
+			fmt.Printf("%-8s %s (not run: unaffected by the changes)\n", "-", j.ID)
+			continue
+		}
 		fmt.Printf("%-8s %s\n", j.Conclusion, j.ID)
 	}
 	return res.Conclusion == runner.Success, nil
