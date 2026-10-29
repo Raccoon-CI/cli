@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"path"
 	"slices"
 	"strings"
 
@@ -35,6 +36,12 @@ const maxLockfile = 64 << 20
 // ErrUnpinned means a toolchain has a manifest but no lockfile, so nothing says
 // when its dependencies change; such a project is not snapshotted.
 var ErrUnpinned = errors.New("dependencies are not pinned by a lockfile")
+
+// maxWalk bounds the directory walk that looks for nested projects.
+const maxWalk = 20000
+
+// skipDirs hold installed, vendored or VCS data, not the project's own manifests.
+var skipDirs = map[string]bool{".git": true, "node_modules": true, "vendor": true, ".venv": true, "venv": true, "target": true}
 
 // ErrNothingToSnapshot means no demanded toolchain has dependencies in the repo.
 var ErrNothingToSnapshot = errors.New("no lockfile among the toolchains this job uses")
@@ -63,6 +70,10 @@ func Compute(repo fs.FS, cat *catalog.Catalog, base string, toolchains []string)
 	names := slices.Clone(toolchains)
 	slices.Sort(names)
 	names = slices.Compact(names)
+
+	if err := checkNested(repo, cat, names); err != nil {
+		return Key{}, err
+	}
 
 	var parts []Part
 	for _, name := range names {
@@ -105,6 +116,53 @@ func Compute(repo fs.FS, cat *catalog.Catalog, base string, toolchains []string)
 		fmt.Fprintf(h, "%s\t%s\t%s\n", p.Toolchain, p.File, p.SHA256)
 	}
 	return Key{Hash: hex.EncodeToString(h.Sum(nil)), Parts: parts}, nil
+}
+
+// checkNested fails with ErrUnpinned when a used toolchain has a manifest or
+// lockfile below the repo root. The key covers the root only, so a change in
+// such a subdirectory would go unnoticed and a stale snapshot be reused.
+func checkNested(repo fs.FS, cat *catalog.Catalog, names []string) error {
+	owner := map[string]string{} // file name -> toolchain
+	for _, name := range names {
+		def := cat.Toolchains[name]
+		if def == nil {
+			continue
+		}
+		for _, f := range def.Manifests {
+			owner[f] = name
+		}
+		for _, f := range def.Lockfiles {
+			owner[f] = name
+		}
+	}
+	if len(owner) == 0 {
+		return nil
+	}
+	seen := 0
+	var found error
+	err := fs.WalkDir(repo, ".", func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if seen++; seen > maxWalk {
+			return fmt.Errorf("%w: more than %d entries to search for nested projects", ErrUnpinned, maxWalk)
+		}
+		if d.IsDir() {
+			if p != "." && skipDirs[d.Name()] {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		if tc, ok := owner[d.Name()]; ok && path.Dir(p) != "." {
+			found = fmt.Errorf("%w: %s has %s below the repository root, which the key does not cover", ErrUnpinned, cat.Title(tc), p)
+			return fs.SkipAll
+		}
+		return nil
+	})
+	if found != nil {
+		return found
+	}
+	return err
 }
 
 func hashFile(repo fs.FS, name string) (sum string, ok bool, err error) {

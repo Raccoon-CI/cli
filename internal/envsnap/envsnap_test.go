@@ -147,3 +147,40 @@ func TestOpenRejectsACorruptIndex(t *testing.T) {
 		}
 	}
 }
+
+// Compute reads the repo root only for lockfiles, so dependencies that live in
+// a subdirectory would not be in the key: a change there would reuse a stale
+// snapshot. Such a repo must not be snapshotted.
+func TestSubdirectoryDependenciesMakeTheProjectUnsnapshottable(t *testing.T) {
+	root := fstest.MapFS{
+		"go.mod": {Data: []byte("module x\n")}, "go.sum": {Data: []byte("s\n")},
+	}
+	if _, err := key(t, root, "b", "go", "node"); err != nil {
+		t.Fatalf("a root-only repo should work: %v", err)
+	}
+	for _, sub := range []string{"web/package.json", "web/package-lock.json", "tools/go.mod", "a/b/Cargo.lock"} {
+		repo := fstest.MapFS{}
+		for k, v := range root {
+			repo[k] = v
+		}
+		repo[sub] = &fstest.MapFile{Data: []byte("{}")}
+		_, err := key(t, repo, "b", "go", "node", "rust")
+		if !errors.Is(err, ErrUnpinned) {
+			t.Errorf("%s: err = %v, want ErrUnpinned", sub, err)
+		}
+	}
+	// Directories that hold installed or vendored code are not the project's own.
+	repo := fstest.MapFS{
+		"go.mod": root["go.mod"], "go.sum": root["go.sum"],
+		"node_modules/x/package.json": {Data: []byte("{}")},
+		".git/config":                 {Data: []byte("")},
+	}
+	if _, err := key(t, repo, "b", "go", "node"); err != nil {
+		t.Errorf("node_modules must be ignored: %v", err)
+	}
+	// A subdirectory for a toolchain the job does not use does not matter.
+	repo = fstest.MapFS{"go.mod": root["go.mod"], "go.sum": root["go.sum"], "web/package.json": {Data: []byte("{}")}}
+	if _, err := key(t, repo, "b", "go"); err != nil {
+		t.Errorf("unused toolchain's subdirectory: %v", err)
+	}
+}
