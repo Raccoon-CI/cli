@@ -3,9 +3,11 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
@@ -13,6 +15,7 @@ import (
 	"time"
 
 	"raccoonci/internal/catalog"
+	"raccoonci/internal/envsnap"
 	"raccoonci/internal/plan"
 	"raccoonci/internal/platform"
 	"raccoonci/internal/runnerimages"
@@ -160,7 +163,7 @@ func printPlan(out io.Writer, path string, cat *catalog.Catalog) error {
 			fmt.Fprintln(out, "  matrix: dynamic, expanded at run time")
 		case len(j.Instances) == 1 && len(j.Instances[0].Matrix) == 0:
 			fmt.Fprintf(out, "  %s\n", describe(j.Instances[0]))
-			printNeeds(out, j.Instances[0], "  ")
+			printNeeds(out, j.Instances[0], "  ", opts.Repo, cat)
 		default:
 			fmt.Fprintf(out, "  matrix: %d combinations\n", len(j.Instances))
 			for _, inst := range j.Instances {
@@ -169,7 +172,7 @@ func printPlan(out io.Writer, path string, cat *catalog.Catalog) error {
 					return err
 				}
 				fmt.Fprintf(out, "    %s  %s\n", b, describe(inst))
-				printNeeds(out, inst, "      ")
+				printNeeds(out, inst, "      ", opts.Repo, cat)
 			}
 		}
 		var warnings []string
@@ -210,10 +213,41 @@ func repoRoot(workflowPath string) (string, bool) {
 	return filepath.Dir(filepath.Dir(dir)), true
 }
 
-func printNeeds(out io.Writer, inst *plan.Instance, indent string) {
+// snapshotNote says whether an instance's installed dependencies could be kept
+// in a reusable environment snapshot, and what decides when it goes stale.
+func snapshotNote(repo fs.FS, cat *catalog.Catalog, inst *plan.Instance) string {
+	if repo == nil || inst.Needs == nil {
+		return ""
+	}
+	var toolchains []string
+	for _, d := range inst.Needs.Demands {
+		if d.Kind == scan.Toolchain {
+			toolchains = append(toolchains, d.Name)
+		}
+	}
+	k, err := envsnap.Compute(repo, cat, "", toolchains)
+	switch {
+	case errors.Is(err, envsnap.ErrNothingToSnapshot) || (err != nil && len(toolchains) == 0):
+		return ""
+	case err != nil:
+		return "environment snapshot: no, " + err.Error()
+	}
+	var files []string
+	for _, p := range k.Parts {
+		files = append(files, p.File)
+	}
+	return "environment snapshot: possible, stale when " + strings.Join(files, ", ") + " changes"
+}
+
+func printNeeds(out io.Writer, inst *plan.Instance, indent string, repo fs.FS, cat *catalog.Catalog) {
 	if inst.Needs == nil {
 		return
 	}
+	defer func() {
+		if note := snapshotNote(repo, cat, inst); note != "" {
+			fmt.Fprintf(out, "%s%s\n", indent, note)
+		}
+	}()
 	for _, d := range inst.Needs.Demands {
 		what := d.Name
 		switch {
