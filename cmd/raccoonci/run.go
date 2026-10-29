@@ -28,6 +28,7 @@ import (
 	"raccoonci/internal/catalog"
 	"raccoonci/internal/dispatch"
 	"raccoonci/internal/engine"
+	"raccoonci/internal/envsnap"
 	"raccoonci/internal/instabox"
 	"raccoonci/internal/local"
 	"raccoonci/internal/runner"
@@ -57,6 +58,7 @@ func runWorkflow(args []string, cat *catalog.Catalog, remote *remoteFlags) (ok b
 	debug := fs.Bool("debug", false, "show ::debug:: output")
 	cacheProtocol := fs.String("cache-protocol", "v1", "which actions/cache protocol to offer steps: v1 or v2 (both read and write the same entries)")
 	cacheLimitGB := fs.Int("cache-limit-gb", 10, "the most the cache of a repository may hold, in GiB (GitHub allows 10); the least recently used entries are evicted first; 0 means no limit")
+	envSnapshots := fs.Int("env-snapshots", 0, "with -on: keep up to this many environment snapshots per repository: after a successful run, a machine whose job installed dependencies (all lockfiles pinned) is saved, and later runs with the same lockfiles start from it; 0 turns it off")
 	install := fs.String("install", "toolchains", "what to install for each job before it runs: none; toolchains (Node.js, Go... into the tool cache, which touches nothing else); or all (also apt packages, with sudo)")
 	fs.Usage = func() {
 		fmt.Fprintln(fs.Output(), "usage: raccoonci run [flags] <workflow.yml>")
@@ -178,6 +180,20 @@ func runWorkflow(args []string, cat *catalog.Catalog, remote *remoteFlags) (ok b
 		}
 		rr.workflow, rr.github, rr.vars, rr.inputs = filepath.ToSlash(rel), github, varObj, inputObj
 		rr.secrets, rr.install, rr.event = secretValues, *install, printer.Event
+		defer rr.provider.Wait() // snapshots being saved and machines being deleted
+		if *envSnapshots > 0 {
+			idxDir := filepath.Join(cache, "envsnap")
+			if err := os.MkdirAll(idxDir, 0o755); err != nil {
+				return false, err
+			}
+			if rr.snaps, err = envsnap.Open(filepath.Join(idxDir, repoDirName(repository.(string))+".json"), *envSnapshots); err != nil {
+				return false, err
+			}
+			rr.cat, rr.repoFS = cat, repoDir.FS()
+			// A fork's pull request runs its author's code; what it leaves on the
+			// disk must not seed later runs.
+			rr.trusted = !strings.HasPrefix(*event, "pull_request")
+		}
 		if rr.sourceTar, err = makeSourceTar(repo, *workDir); err != nil {
 			return false, fmt.Errorf("packing the source: %w", err)
 		}

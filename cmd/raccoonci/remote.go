@@ -9,13 +9,17 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 
+	"raccoonci/internal/catalog"
 	"raccoonci/internal/dispatch"
 	"raccoonci/internal/engine"
+	"raccoonci/internal/envsnap"
 	"raccoonci/internal/instabox"
 	"raccoonci/internal/runner"
 	"raccoonci/internal/value"
@@ -104,6 +108,88 @@ type remoteRun struct {
 
 	prefix string
 	n      atomic.Int32
+
+	// Environment snapshots (-env-snapshots). snaps is nil when they are off.
+	snaps   *envsnap.Index
+	cat     *catalog.Catalog
+	repoFS  fs.FS
+	trusted bool // the event comes from the repository's own code, not a fork's
+	mu      sync.Mutex
+	claimed map[string]bool // keys being snapshotted now: one machine per key does it
+}
+
+func (rr *remoteRun) say(format string, args ...any) {
+	if rr.provider.Logf != nil {
+		rr.provider.Logf(format, args...)
+	}
+}
+
+// restore finds the environment snapshot for an instance. key is empty when
+// the instance cannot use one (nothing to cache, or dependencies not pinned).
+func (rr *remoteRun) restore(inst engine.RemoteInstance) (key, from string) {
+	if rr.snaps == nil || len(inst.Toolchains) == 0 {
+		return "", ""
+	}
+	k, err := envsnap.Compute(rr.repoFS, rr.cat, rr.provider.Snapshot, inst.Toolchains)
+	if err != nil {
+		return "", ""
+	}
+	if e, ok := rr.snaps.Lookup(k.Hash); ok {
+		rr.say("%s: starting from environment snapshot %s", inst.Name, e.Snapshot)
+		return k.Hash, e.Snapshot
+	}
+	return k.Hash, ""
+}
+
+// keep decides whether a finished instance's machine becomes the environment
+// snapshot for key. Only a successful run that started from the runner
+// snapshot, on a trusted event and with no secrets in play (a job can leave
+// them on disk, and a snapshot copies the disks), and only one machine per key.
+func (rr *remoteRun) keep(key string, reader *wireReader) string {
+	if key == "" {
+		return ""
+	}
+	reader.Flush()
+	out, ok, _ := reader.Result()
+	if !ok || out.Conclusion != runner.Success || !rr.trusted || len(rr.secrets) > 0 {
+		return ""
+	}
+	rr.mu.Lock()
+	defer rr.mu.Unlock()
+	if rr.claimed[key] {
+		return ""
+	}
+	if rr.claimed == nil {
+		rr.claimed = map[string]bool{}
+	}
+	rr.claimed[key] = true
+	var b [3]byte
+	rand.Read(b[:])
+	return "rc-env-" + key[:12] + "-" + hex.EncodeToString(b[:])
+}
+
+func (rr *remoteRun) kept(key, name string, snapID string, err error) {
+	rr.mu.Lock()
+	delete(rr.claimed, key)
+	rr.mu.Unlock()
+	ctx := context.Background()
+	if err != nil {
+		rr.say("environment snapshot %s not saved: %v", name, err)
+		if snapID != "" {
+			rr.provider.Client.DeleteSnapshot(ctx, snapID)
+		}
+		return
+	}
+	evicted, perr := rr.snaps.Put(key, snapID, rr.provider.Snapshot)
+	if perr != nil {
+		rr.say("environment snapshot index: %v", perr)
+	}
+	rr.say("saved environment snapshot %s (%s)", name, snapID)
+	for _, e := range evicted {
+		if derr := rr.provider.Client.DeleteSnapshot(ctx, e.Snapshot); derr != nil {
+			rr.say("could not delete old environment snapshot %s: %v", e.Snapshot, derr)
+		}
+	}
 }
 
 func newRemoteRun(p *instabox.Provider) *remoteRun {
@@ -132,7 +218,7 @@ func (rr *remoteRun) run(ctx context.Context, inst engine.RemoteInstance) (runne
 	}
 	reader := &wireReader{name: inst.Name, event: rr.event}
 	defer reader.Flush()
-	res, err := rr.provider.Run(ctx, fmt.Sprintf("%s-%d", rr.prefix, rr.n.Add(1)), dispatch.Job{
+	job := dispatch.Job{
 		Command: "run-instance",
 		Input:   input,
 		Secrets: rr.secrets,
@@ -146,7 +232,28 @@ func (rr *remoteRun) run(ctx context.Context, inst engine.RemoteInstance) (runne
 			return err
 		},
 		Log: reader,
-	})
+	}
+	key, from := rr.restore(inst)
+	attempt := func(from string) (dispatch.Result, error) {
+		opts := &instabox.RunOptions{From: from}
+		if key != "" && from == "" {
+			var name string
+			opts.Keep = func(dispatch.Result) string {
+				name = rr.keep(key, reader)
+				return name
+			}
+			opts.Kept = func(id string, err error) { rr.kept(key, name, id, err) }
+		}
+		return rr.provider.Run(ctx, fmt.Sprintf("%s-%d", rr.prefix, rr.n.Add(1)), job, opts)
+	}
+	res, err := attempt(from)
+	var apiErr *instabox.Error
+	if from != "" && errors.As(err, &apiErr) && (apiErr.Status == 400 || apiErr.Status == 404) {
+		// The snapshot is gone (deleted elsewhere): forget it and start from the runner snapshot.
+		rr.say("environment snapshot %s is gone (%v); starting from the runner snapshot", from, err)
+		rr.snaps.Remove(key)
+		res, err = attempt("")
+	}
 	if err != nil {
 		return runner.Result{}, err
 	}
