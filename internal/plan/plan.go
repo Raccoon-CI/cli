@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io/fs"
 
+	"raccoonci/internal/actions"
 	"raccoonci/internal/catalog"
 	"raccoonci/internal/expr"
 	"raccoonci/internal/platform"
@@ -60,6 +61,10 @@ type Options struct {
 	Repo fs.FS
 	// Catalog defaults to catalog.Default().
 	Catalog *catalog.Catalog
+	// Action reads the metadata of a remote action, so the scan can see
+	// inside composite and docker actions (see scan.Input.Action). Without
+	// it only the workflow's own steps and local actions are scanned.
+	Action func(uses string) (*actions.Action, bool)
 }
 
 // Unavailable reports whether the instance needs an OS Raccoon CI can't
@@ -146,6 +151,7 @@ func buildJob(w *workflow.Workflow, wj *workflow.Job, opts Options) (*Job, error
 				Image:    imageFor(opts.Catalog, inst, opts.Images),
 				Repo:     opts.Repo,
 				Catalog:  opts.Catalog,
+				Action:   opts.Action,
 			})
 		}
 		j.Instances = append(j.Instances, inst)

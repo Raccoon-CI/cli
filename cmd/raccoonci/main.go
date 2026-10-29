@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"raccoonci/internal/actions"
 	"raccoonci/internal/catalog"
 	"raccoonci/internal/envsnap"
 	"raccoonci/internal/plan"
@@ -29,8 +30,10 @@ var version = "dev"
 const usage = `usage: raccoonci [-version] [catalog flags] <command> [args]
 
 commands:
-  plan <workflow.yml>                parse a workflow and list its jobs, matrix combinations
-                                     and what each run needs installed
+  plan [-fetch-actions] <workflow.yml>
+                                     parse a workflow and list its jobs, matrix combinations
+                                     and what each run needs installed; -fetch-actions
+                                     downloads third-party actions to look inside them
   run [flags] <workflow.yml>         run a workflow on this machine (raccoonci run -h for flags)
   agent [flags]                      on a machine a controller sends jobs to: wait for
                                      ~/.raccoonci-agent.json, run the job it names
@@ -81,7 +84,9 @@ func main() {
 
 	switch args := flag.Args(); {
 	case len(args) == 2 && args[0] == "plan":
-		err = printPlan(os.Stdout, args[1], cat)
+		err = printPlan(os.Stdout, args[1], cat, false)
+	case len(args) == 3 && args[0] == "plan" && args[1] == "-fetch-actions":
+		err = printPlan(os.Stdout, args[2], cat, true)
 	case len(args) >= 1 && args[0] == "run":
 		var ok bool
 		if rf, rest, serr := splitRemote(args[1:]); serr != nil {
@@ -138,7 +143,10 @@ func updateRunnerImages(dir string, cat *catalog.Catalog) error {
 	return s.WriteDir(dir)
 }
 
-func printPlan(out io.Writer, path string, cat *catalog.Catalog) error {
+// printPlan prints a workflow's plan. With fetchActions the third-party actions
+// it uses are downloaded (into a temporary directory) so the scan can see what
+// their steps need; without it only the workflow's own steps are scanned.
+func printPlan(out io.Writer, path string, cat *catalog.Catalog, fetchActions bool) error {
 	src, err := os.ReadFile(path)
 	if err != nil {
 		return err
@@ -152,6 +160,14 @@ func printPlan(out io.Writer, path string, cat *catalog.Catalog) error {
 		return err
 	}
 	opts := plan.Options{Images: images, Catalog: cat}
+	if fetchActions {
+		dir, err := os.MkdirTemp("", "raccoonci-plan-actions-")
+		if err != nil {
+			return err
+		}
+		defer os.RemoveAll(dir)
+		opts.Action = actions.NewStore(dir, os.Getenv("GITHUB_TOKEN")).Lookup(context.Background())
+	}
 	if root, ok := repoRoot(path); ok {
 		r, err := os.OpenRoot(root) // confines reads to the repo, even through symlinks
 		if err != nil {
