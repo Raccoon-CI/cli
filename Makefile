@@ -5,7 +5,7 @@ LDFLAGS := -s -w -X main.version=$(VERSION)
 .PHONY: build runner-binary test race vet check clean runner-images
 
 build:
-	$(GO) build -trimpath -ldflags "$(LDFLAGS)" -o dist/ ./cmd/raccoonci
+	$(GO) build -trimpath -ldflags "$(LDFLAGS)" -o dist/ ./cmd/raccoonci ./cmd/raccoonbench
 
 # The binary the InstaBox runner snapshot installs: static, so it runs on any
 # template. Build it with a real VERSION; `raccoonci runner-snapshot` refuses "dev".

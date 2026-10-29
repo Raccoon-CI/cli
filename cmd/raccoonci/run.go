@@ -48,6 +48,7 @@ func (l *listFlag) Set(s string) error { *l = append(*l, s); return nil }
 // remote set (`-on instabox`), the job graph is still resolved here but every
 // job instance runs on a machine of its own.
 func runWorkflow(args []string, cat *catalog.Catalog, remote *remoteFlags) (ok bool, err error) {
+	processStart := time.Now()
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
 	var jobs, secrets, vars, inputs listFlag
 	fs.Var(&jobs, "job", "run only this job and the jobs it needs (repeatable)")
@@ -64,6 +65,7 @@ func runWorkflow(args []string, cat *catalog.Catalog, remote *remoteFlags) (ok b
 	evFlags.register(fs, false)
 	onlyIfTriggered := fs.Bool("only-if-triggered", false, "run nothing unless the workflow's on: (branches, tags, paths, types) is triggered by the event, described by -event, -ref, -base-ref, -file ...; by default `run` assumes it is")
 	onlyAffected := fs.Bool("affected", false, "leave out the jobs the changed files do not concern (see `raccoonci affected`); the changes come from git, or -file/-before")
+	usageFile := fs.String("usage-file", "", "with -on: write what each machine used (when it was requested, ready and deleted, its size) to this file, one JSON object per line; money is worked out from it, not stored")
 	var s3f cacheS3Flags
 	s3f.register(fs)
 	envSnapshots := fs.Int("env-snapshots", 0, "with -on: keep up to this many environment snapshots per repository: after a successful run, a machine whose job installed dependencies (all lockfiles pinned) is saved, and later runs with the same lockfiles start from it; 0 turns it off")
@@ -295,6 +297,13 @@ func runWorkflow(args []string, cat *catalog.Catalog, remote *remoteFlags) (ok b
 			OnEvent:           printer.Event,
 		},
 	})
+	// The answer is in; what follows (saving snapshots, deleting machines) is
+	// housekeeping a user need not wait for, and a benchmark must not count.
+	fmt.Fprintf(os.Stderr, "raccoonci: results ready after %.1f s\n", time.Since(processStart).Seconds())
+	if rr != nil {
+		rr.provider.Wait() // snapshots being saved and machines being deleted
+		reportUsage(rr.provider.Usage(), *usageFile)
+	}
 	if err != nil {
 		return false, err
 	}

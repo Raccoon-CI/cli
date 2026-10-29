@@ -109,6 +109,11 @@ func TestSplitRemote(t *testing.T) {
 	if !slices.Equal(rest, want) {
 		t.Errorf("rest = %v, want %v", rest, want)
 	}
+	// A flag without a value must not swallow the next word.
+	_, rest, err = splitRemote([]string{"-on", "instabox", "-affected", "-env-snapshots", "5", "-only-if-triggered", "w.yml"})
+	if err != nil || !slices.Equal(rest, []string{"-affected", "-env-snapshots", "5", "-only-if-triggered", "w.yml"}) {
+		t.Errorf("rest = %v, err = %v", rest, err)
+	}
 	if _, _, err := splitRemote([]string{"-on"}); err == nil {
 		t.Error("a flag with no value was accepted")
 	}

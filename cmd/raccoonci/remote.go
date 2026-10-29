@@ -65,7 +65,15 @@ func splitRemote(args []string) (rf remoteFlags, rest []string, err error) {
 	return rf, append(rest, args[i:]...), nil
 }
 
-func isBool(flagName string) bool { return flagName == "debug" }
+// isBool lists the flags of `run` that take no value, so splitRemote does not
+// take the word after one for its value. Keep it in step with run.go.
+func isBool(flagName string) bool {
+	switch flagName {
+	case "debug", "affected", "only-if-triggered", "cache-s3-path-style":
+		return true
+	}
+	return false
+}
 
 // check validates the flags of `run -on` and returns the API key.
 func (rf *remoteFlags) check() (key string, err error) {
@@ -90,6 +98,29 @@ func (rf *remoteFlags) check() (key string, err error) {
 	}
 	rf.controllerURL = strings.TrimRight(rf.controllerURL, "/")
 	return key, nil
+}
+
+// reportUsage prints how many machines a run used and for how long, with the
+// cost at InstaBox's unit prices as of the date in instabox.InstaBoxPrices (a
+// guide: they change, which is why the raw usage can be written to a file for
+// pricing later).
+func reportUsage(us []instabox.Usage, file string) {
+	if file != "" {
+		if f, err := os.Create(file); err != nil {
+			fmt.Fprintf(os.Stderr, "raccoonci: -usage-file: %v\n", err)
+		} else {
+			if err := instabox.WriteUsage(f, us); err != nil {
+				fmt.Fprintf(os.Stderr, "raccoonci: -usage-file: %v\n", err)
+			}
+			f.Close()
+		}
+	}
+	if len(us) == 0 {
+		return
+	}
+	s := instabox.InstaBoxPrices.Summarize(us)
+	fmt.Fprintf(os.Stderr, "raccoonci: %d machines, %.0f machine-seconds, about $%.4f at InstaBox's unit prices of 2026-10-29 (not counting snapshot storage or egress)\n",
+		s.Machines, s.Seconds, s.Cost)
 }
 
 // remoteRun sends the job instances of one run to machines, one machine each.

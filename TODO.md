@@ -137,7 +137,13 @@ Node.js、Go、Python、Java、Rust、apt 包已经通了（见"已完成"和下
 - ⬜ 不可用 OS 的兜底：现在只有"明确失败 + plan 提前警告"；"连接自己的 Mac / Windows 机器去跑"还没做
 - ⬜ Windows 支持（可能以后放在 InstaBox 上）；macOS 只能走用户自己的机器
 
-### 3.7 安全与隔离
+### 3.6b 基准（`cmd/raccoonbench`、`bench/`）
+
+项目做完后用来和现有方案比时间与花费，用法见 `bench/README.md`。
+
+- ✅ 已做（2026-10-29）：`raccoonbench run` 按"系统 × 工作负载"跑，每个会话从零开始依次跑三个场景（冷启动、同一提交再来一次、改一个文件后的提交），`-repeat N` 次取中位数和范围；系统有四种：当前版本的 raccoonci（`-on instabox` 每个 job 实例一台机器，可带 `-env-snapshots`、`-affected`）、**更早版本**的 raccoonci（`ref` 是本仓库的 git 提交，现编译，放在一台 InstaBox 机器上整个 workflow 一台机器跑，就是"更新前的自己"）、GitHub 托管 runner（fork 上 `workflow_dispatch`，读 API 里的 job 起止时间和标签）、InstaBox 官方 runner（同一个 fork 的另一个分支，`runs-on: instabox-medium`）。**结果里只存原始用量**（秒数、机器规格、每个 job 的计费时长、保存了几个快照），**不存钱**；`raccoonbench report -prices bench/prices.yml` 才按价格表算，所以涨价降价了只要改价格文件（带 `as_of` 和来源）重新出报告，不用重跑。计费规则：InstaBox 机器按"请求创建到删除返回"的秒数 × 规格单价（vCPU、内存、磁盘）+ 保存的环境快照在保留时间内的存储；GitHub 每个 job 向上取整到分钟 × 标签单价（标签没价格就报"未知"，不瞎猜）；InstaBox 官方 runner 按秒 × 价格文件里写的规格（"medium"到底多大要你填）。报告每行还核对"做的是不是同一批 job"（因不受影响而略过的 job 算成功），避免靠少做活得到的提速。产品里新增：`run -on instabox` 结束时打印机器数、机器秒数和估算花费，`-usage-file` 写出每台机器的请求/就绪/删除时间和规格；还打印 `results ready after X s`（出结果的时间，不含保存快照和删机器的收尾）。顺带修了 `splitRemote` 的一个 bug：`-affected` 这类无值的开关会吞掉后面一个词。价格文件里放了你给的 InstaBox 单价（2026-10-29 价格页）和 GitHub 每分钟 $0.008（我没核对，需要你对照官方价格表确认）。
+- 🟡 实测过的部分：本机直接跑、旧版本在一台机器上跑、当前版本 `-on instabox`（含快照、affected）。GitHub 托管和 InstaBox 官方 runner 两个系统**只用假服务器测过**（派发、等待、读 job、取整计费），没有真实验证；需要你的 fork、`GITHUB_TOKEN`、以及 InstaBox 的 GitHub App。
+- **第一次真实测量的结果（`monorepo` 夹具，每个测试睡 15 秒，各 2 次，当时的 runner 快照是旧二进制）**：旧版本一台机器：冷 39 s、warm 17 s、change 17 s，约 $0.0002–0.0004；当前版本每个 job 一台机器：冷 55 s、warm 45 s、change 48 s，约 $0.0008–0.0009，**更慢也更贵**，因为每台机器的启动（几秒到二十秒，并发创建时更长）比 15 秒的测试还长，deploy 又要再等一台机器。`-affected` 在 change 场景略过 frontend，花费降到 $0.0005，时间基本没变（backend 和 deploy 的机器启动占大头）。环境快照在这个夹具上没有用上（子目录里的 `go.mod`/`package.json` 让它被判为"不能快照"）。结论：**每个 job 一台机器只有在 job 本身够长、或并行度够高时才划算**，job 只有几秒到十几秒的工作负载上不如一台机器跑完。这是后面要正视的设计问题（比如：短 job 合并到同一台机器、机器池/预热、从快照启动前提前创建）。
 
 - ⬜ 沙箱：job 现在直接以当前用户在本机运行，隔离完全依赖 provider 的虚拟机
 - ⬜ 来自 fork PR 的 workflow 的 secrets 策略

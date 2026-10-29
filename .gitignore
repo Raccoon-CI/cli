@@ -2,3 +2,8 @@ dist/
 /raccoonci
 .env
 *.env.local
+
+# benchmark: local config (ids, addresses) and results
+/bench/config.local.yml
+/bench/results*.jsonl
+/bench/report*.md
