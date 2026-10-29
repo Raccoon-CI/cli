@@ -12,7 +12,7 @@
 |---|------|------|------|
 | 1 | workflow 解析 + matrix 展开 | ✅ | 含表达式求值 |
 | 2 | 依赖扫描器 | ✅ | |
-| 3 | 单机执行器 | 🟡 | `run:`、JS/composite action、容器 job 和 `services:` 可用；Docker action、可复用 workflow 不支持 |
+| 3 | 单机执行器 | 🟡 | `run:`、JS/composite/Docker action、容器 job 和 `services:` 可用；可复用 workflow 不支持 |
 | 3.5 | 装环境（按扫描结果安装） | 🟡 | Node.js、Go、Python、Java、Rust、apt 包已通；Ruby 和各种 CLI 工具还没有安装器（见 3.1） |
 | 4 | artifact v4 + cache v1/v2 服务 | ✅ | 两者在本机运行里都用真实 action 实测通过；v3 REST、持久化/淘汰等见 3.2 |
 | 5 | InstaBox provider | ⬜ | |
@@ -94,7 +94,7 @@ Node.js、Go、Python、Java、Rust、apt 包已经通了（见"已完成"和下
 - ✅ job 结束后 chown：断言容器里 root 写的文件归还给当前用户；把 chown 关掉后断言会失败
 - ✅ Alpine（musl）镜像的 JS action：job 容器是 musl 时用 `unofficial-builds.nodejs.org` 的 musl 版 Node（同样校验 SHA-256，装在 `node/musl/` 下，随 `node/` 一起挂进容器）。musl 版动态链接 libstdc++，Alpine 没有，所以 Node 起不来时在容器里以 root 执行 `apk add libstdc++`（只影响这个 job 的容器，步骤日志有 notice）。实测真实 `upload-artifact@v4`/`download-artifact@v4` 在 Alpine 容器里跑通。`actions/cache` 在裸 Alpine 里会因 busybox 的 tar 失败，与 GitHub 上相同，镜像里需要 `apk add tar`
 - ⬜ 容器 job 剩余：宿主机防火墙若拦截 INPUT（如 ufw 默认 deny），容器连网关会失败，目前没有检测；非 root 用户的镜像（`--user`）；被强杀的进程留下的孤儿容器没有清扫（容器带标签 `raccoonci=1`）；Alpine 的 `apk add` 需要容器能访问 Alpine 镜像源，离线或非 root 的 Alpine 镜像要自己预装 libstdc++；没有 `/bin/sh` 的镜像（distroless）上取消仍然只会杀 docker 客户端
-- ⬜ Docker action（`uses: docker://…`、`runs.using: docker`）
+- ✅ Docker action（2026-10-29，`internal/runner/docker_action.go`）：`uses: docker://image`（`with.entrypoint`、`with.args` 按命令行规则切分，不展开）和 `runs.using: docker`（`image: docker://…` 先拉取，`image: Dockerfile` 用 action 目录 `docker build`，每个 job 只建一次；`runs.entrypoint`/`args`/`env`，args 和 env 里可以用 `inputs`；`pre-entrypoint`/`post-entrypoint` 带 pre/post-if）。做法照 GitHub 的 runner：`docker run --rm`，工作区、temp、工具缓存、文件命令目录、event 目录和一个 home 分别挂到 `/github/workspace`、`/github/runner_temp`、`/opt/hostedtoolcache`、`/github/file_commands`、`/github/workflow`、`/github/home`，`GITHUB_*`/`RUNNER_*` 里的路径变量改写成容器里的路径，不传本机环境和 PATH，有 job 网络就加入，挂 docker.sock；输出走和别的步骤一样的路径，所以 `::set-output` 类命令和 `$GITHUB_OUTPUT`/`$GITHUB_ENV` 都能用；取消时先 SIGINT（docker 客户端转发给容器），宽限期后 `docker kill`。结束后用同一个镜像 `chown` 把容器里 root 写的文件还给当前用户（镜像没有 chown 就算了）。真实验证：`actions/hello-world-docker-action@v2`（Dockerfile 构建，输出被后面的步骤读到）、`docker://alpine`，以及一个带 pre/post/args/env 的本地 Dockerfile action（`TestRealDockerActions`，需要 `RACCOONCI_TEST_DOCKER=1`）。**注意**：`runs.args` 现在也传给 pre/post entrypoint（凭记忆照 runner 的实现，没找到文档确认）；pre 只对远程 action 执行（和 JS 的 pre 一样）；不支持 `--user`/job 容器 `options:` 对 action 的影响；机器上 docker 要可用（InstaBox 的 universal 模板有）
 - ⬜ 可复用 workflow（`jobs.<id>.uses`、`workflow_call`）
 - ⬜ problem matcher（目前输出原样记录，不生成 annotation）
 
