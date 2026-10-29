@@ -5,24 +5,24 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"net"
-	"net/http"
 	"os"
-	"os/signal"
 	"path/filepath"
 	"strings"
-	"time"
+	"sync/atomic"
 
 	"raccoonci/internal/dispatch"
+	"raccoonci/internal/engine"
 	"raccoonci/internal/instabox"
+	"raccoonci/internal/runner"
+	"raccoonci/internal/value"
 )
 
 // remoteFlags are the `run` flags that choose where it runs. They are taken
-// out of the argument list; everything else is forwarded to the machine's
-// `raccoonci run`.
+// out of the argument list; `run` parses the rest.
 type remoteFlags struct {
 	on, listen, controllerURL, snapshot string
 	startAgent                          bool
@@ -49,8 +49,8 @@ func splitRemote(args []string) (rf remoteFlags, rest []string, err error) {
 			*target = val
 		default:
 			rest = append(rest, args[i])
-			// A flag of the local run that takes its value as the next word
-			// keeps it, so the value is not mistaken for the workflow path.
+			// A flag that takes its value as the next word keeps it, so the
+			// value is not mistaken for the workflow path.
 			if !hasVal && !isBool(name) && i+1 < len(args) {
 				i++
 				rest = append(rest, args[i])
@@ -62,116 +62,128 @@ func splitRemote(args []string) (rf remoteFlags, rest []string, err error) {
 
 func isBool(flagName string) bool { return flagName == "debug" }
 
-// runRemote implements `raccoonci run -on instabox`: the whole workflow runs
-// on one new InstaBox machine made from a runner snapshot.
-func runRemote(rf remoteFlags, args []string) (bool, error) {
+// check validates the flags of `run -on` and returns the API key.
+func (rf *remoteFlags) check() (key string, err error) {
 	if rf.on != "instabox" {
-		return false, fmt.Errorf("-on %q: only instabox is supported", rf.on)
+		return "", fmt.Errorf("-on %q: only instabox is supported", rf.on)
 	}
 	// INSTABOX_API_KEY is reserved on InstaBox machines (the MCP uses it);
 	// IBX_API_KEY is the name an org Secret can have there.
-	key := cmp.Or(os.Getenv("INSTABOX_API_KEY"), os.Getenv("IBX_API_KEY"))
+	key = cmp.Or(os.Getenv("INSTABOX_API_KEY"), os.Getenv("IBX_API_KEY"))
 	if key == "" {
-		return false, errors.New("-on instabox needs INSTABOX_API_KEY (or IBX_API_KEY) in the environment")
+		return "", errors.New("-on instabox needs INSTABOX_API_KEY (or IBX_API_KEY) in the environment")
 	}
+	rf.snapshot = cmp.Or(rf.snapshot, os.Getenv("RACCOONCI_INSTABOX_SNAPSHOT"))
 	if rf.snapshot == "" {
-		rf.snapshot = os.Getenv("RACCOONCI_INSTABOX_SNAPSHOT")
-	}
-	if rf.snapshot == "" {
-		return false, errors.New("-on instabox needs -snapshot (or RACCOONCI_INSTABOX_SNAPSHOT): the runner snapshot to start machines from")
+		return "", errors.New("-on instabox needs -snapshot (or RACCOONCI_INSTABOX_SNAPSHOT): the runner snapshot to start machines from")
 	}
 	if rf.listen == "" || rf.controllerURL == "" {
-		return false, errors.New("-on instabox needs -listen ADDR and -controller-url URL: where this process serves the machines, and the https address they reach it at (for example a published port)")
+		return "", errors.New("-on instabox needs -listen ADDR and -controller-url URL: where this process serves the machines, and the https address they reach it at (for example a published port)")
 	}
 	if !strings.HasPrefix(rf.controllerURL, "https://") {
-		return false, errors.New("-controller-url must be https: the machine's token and secrets travel on it")
+		return "", errors.New("-controller-url must be https: the machines' tokens and secrets travel on it")
 	}
-
-	// The workflow path is the last argument; secrets are read here and sent
-	// with the assignment, the rest of the flags go to the machine as they are.
-	if len(args) == 0 {
-		return false, errors.New("usage: raccoonci run -on instabox [flags] <workflow.yml>")
-	}
-	wf, err := filepath.Abs(args[len(args)-1])
-	if err != nil {
-		return false, err
-	}
-	repo, ok := repoRoot(wf)
-	if !ok {
-		repo = gitTopLevel(filepath.Dir(wf))
-	}
-	rel, err := filepath.Rel(repo, wf)
-	if err != nil || strings.HasPrefix(rel, "..") {
-		return false, fmt.Errorf("%s is outside its repository %s", wf, repo)
-	}
-	fwd, secrets, err := takeSecrets(args[:len(args)-1])
-	if err != nil {
-		return false, err
-	}
-	fwd = append(fwd, filepath.ToSlash(rel))
-
-	ctl := &dispatch.Controller{}
-	ln, err := net.Listen("tcp", rf.listen)
-	if err != nil {
-		return false, err
-	}
-	srv := &http.Server{Handler: ctl.Handler(), ReadHeaderTimeout: 30 * time.Second}
-	go srv.Serve(ln)
-	defer srv.Close()
-
-	var suffix [4]byte
-	rand.Read(suffix[:])
-	name := "rc-" + hex.EncodeToString(suffix[:])
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
-	defer stop()
-	p := &instabox.Provider{
-		Client:        &instabox.Client{Key: key, URL: os.Getenv("INSTABOX_API_URL")},
-		Controller:    ctl,
-		ControllerURL: strings.TrimRight(rf.controllerURL, "/"),
-		Snapshot:      rf.snapshot,
-		StartAgent:    rf.startAgent,
-		Logf:          func(f string, a ...any) { fmt.Fprintf(os.Stderr, "raccoonci: "+f+"\n", a...) },
-	}
-	res, err := p.Run(ctx, name, dispatch.Job{
-		Args:    fwd,
-		Secrets: secrets,
-		Source:  func(w io.Writer) error { return dispatch.TarDir(w, repo) },
-		Log:     os.Stdout,
-	})
-	if err != nil {
-		return false, err
-	}
-	if res.Error != "" {
-		return false, errors.New("the machine could not run the job: " + res.Error)
-	}
-	return res.ExitCode == 0, nil
+	rf.controllerURL = strings.TrimRight(rf.controllerURL, "/")
+	return key, nil
 }
 
-// takeSecrets removes -secret NAME flags and reads their values from the
-// environment (GITHUB_TOKEN too, when set), as a local run does.
-func takeSecrets(args []string) (rest []string, secrets map[string]string, err error) {
-	secrets = map[string]string{}
-	if t := os.Getenv("GITHUB_TOKEN"); t != "" {
-		secrets["GITHUB_TOKEN"] = t
+// remoteRun sends the job instances of one run to machines, one machine each.
+type remoteRun struct {
+	provider *instabox.Provider
+	// workflow is the workflow's path in the source tree.
+	workflow string
+	// sourceTar holds the source tree as a .tar.gz, made once for all machines.
+	sourceTar string
+	github    value.Object
+	vars      value.Object
+	inputs    value.Object
+	secrets   map[string]string
+	env       map[string]string // what steps need to reach the artifact and cache services
+	install   string
+	event     func(runner.Event)
+
+	prefix string
+	n      atomic.Int32
+}
+
+func newRemoteRun(p *instabox.Provider) *remoteRun {
+	var b [3]byte
+	rand.Read(b[:])
+	return &remoteRun{provider: p, prefix: "rc-" + hex.EncodeToString(b[:])}
+}
+
+// run is engine.Options.Remote.
+func (rr *remoteRun) run(ctx context.Context, inst engine.RemoteInstance) (runner.Result, error) {
+	contexts, err := json.Marshal(value.Object{
+		{Key: "github", Value: rr.github},
+		{Key: "matrix", Value: orEmptyObject(inst.Matrix)},
+		{Key: "strategy", Value: orEmptyObject(inst.Strategy)},
+		{Key: "needs", Value: orEmptyObject(inst.Needs)},
+		{Key: "inputs", Value: orEmptyObject(rr.inputs)},
+		{Key: "vars", Value: orEmptyObject(rr.vars)},
+	})
+	if err != nil {
+		return runner.Result{}, err
 	}
-	for i := 0; i < len(args); i++ {
-		name, val, hasVal := strings.Cut(strings.TrimLeft(args[i], "-"), "=")
-		if name != "secret" || !strings.HasPrefix(args[i], "-") {
-			rest = append(rest, args[i])
-			continue
-		}
-		if !hasVal {
-			if i+1 >= len(args) {
-				return nil, nil, errors.New("-secret needs a name")
+	input, err := json.Marshal(instanceSpec{Workflow: rr.workflow, Job: inst.Job.ID, Contexts: contexts,
+		ServiceEnv: rr.env, Install: rr.install})
+	if err != nil {
+		return runner.Result{}, err
+	}
+	reader := &wireReader{name: inst.Name, event: rr.event}
+	defer reader.Flush()
+	res, err := rr.provider.Run(ctx, fmt.Sprintf("%s-%d", rr.prefix, rr.n.Add(1)), dispatch.Job{
+		Command: "run-instance",
+		Input:   input,
+		Secrets: rr.secrets,
+		Source: func(w io.Writer) error {
+			f, err := os.Open(rr.sourceTar)
+			if err != nil {
+				return err
 			}
-			i++
-			val = args[i]
-		}
-		v, ok := os.LookupEnv(val)
-		if !ok {
-			return nil, nil, fmt.Errorf("-secret %s: no such environment variable", val)
-		}
-		secrets[val] = v
+			defer f.Close()
+			_, err = io.Copy(w, f)
+			return err
+		},
+		Log: reader,
+	})
+	if err != nil {
+		return runner.Result{}, err
 	}
-	return rest, secrets, nil
+	if res.Error != "" {
+		return runner.Result{}, errors.New("the machine could not run the job: " + res.Error)
+	}
+	reader.Flush()
+	out, ok, err := reader.Result()
+	switch {
+	case err != nil:
+		return runner.Result{}, fmt.Errorf("the machine's result: %w", err)
+	case !ok:
+		return runner.Result{}, fmt.Errorf("the machine exited with status %d without a result (its output is above)", res.ExitCode)
+	}
+	return out, nil
+}
+
+func orEmptyObject(o value.Object) value.Object {
+	if o == nil {
+		return value.Object{}
+	}
+	return o
+}
+
+// makeSourceTar archives repo into a file under dir.
+func makeSourceTar(repo, dir string) (string, error) {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", err
+	}
+	p := filepath.Join(dir, "_source.tar.gz")
+	f, err := os.Create(p)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	if err := dispatch.TarDir(f, repo); err != nil {
+		return "", err
+	}
+	return p, f.Close()
 }

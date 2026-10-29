@@ -85,13 +85,15 @@ func main() {
 		if rf, rest, serr := splitRemote(args[1:]); serr != nil {
 			err = serr
 		} else if rf.on != "" {
-			ok, err = runRemote(rf, rest)
+			ok, err = runWorkflow(rest, cat, &rf)
 		} else {
-			ok, err = runWorkflow(args[1:], cat)
+			ok, err = runWorkflow(args[1:], cat, nil)
 		}
 		if err == nil && !ok {
 			os.Exit(1)
 		}
+	case len(args) >= 1 && args[0] == "run-instance": // started by the agent
+		err = runInstance(args[1:], cat)
 	case len(args) >= 1 && args[0] == "agent":
 		err = runAgent(args[1:])
 	case len(args) == 3 && args[0] == "runner-images" && args[1] == "update":

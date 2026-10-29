@@ -26,10 +26,10 @@ import (
 	"raccoonci/internal/blob"
 	"raccoonci/internal/cache"
 	"raccoonci/internal/catalog"
+	"raccoonci/internal/dispatch"
 	"raccoonci/internal/engine"
+	"raccoonci/internal/instabox"
 	"raccoonci/internal/local"
-	"raccoonci/internal/nodejs"
-	"raccoonci/internal/provision"
 	"raccoonci/internal/runner"
 	"raccoonci/internal/runnerimages"
 	"raccoonci/internal/value"
@@ -41,8 +41,10 @@ type listFlag []string
 func (l *listFlag) String() string     { return strings.Join(*l, ",") }
 func (l *listFlag) Set(s string) error { *l = append(*l, s); return nil }
 
-// runWorkflow implements `raccoonci run`. ok is false when the run failed.
-func runWorkflow(args []string, cat *catalog.Catalog) (ok bool, err error) {
+// runWorkflow implements `raccoonci run`. ok is false when the run failed. With
+// remote set (`-on instabox`), the job graph is still resolved here but every
+// job instance runs on a machine of its own.
+func runWorkflow(args []string, cat *catalog.Catalog, remote *remoteFlags) (ok bool, err error) {
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
 	var jobs, secrets, vars, inputs listFlag
 	fs.Var(&jobs, "job", "run only this job and the jobs it needs (repeatable)")
@@ -61,6 +63,8 @@ func runWorkflow(args []string, cat *catalog.Catalog) (ok bool, err error) {
 		fs.PrintDefaults()
 	}
 	fs.Parse(args)
+	parallelSet := false
+	fs.Visit(func(f *flag.Flag) { parallelSet = parallelSet || f.Name == "parallel" })
 	if fs.NArg() != 1 {
 		fs.Usage()
 		os.Exit(2)
@@ -103,11 +107,26 @@ func runWorkflow(args []string, cat *catalog.Catalog) (ok bool, err error) {
 		return false, err
 	}
 
-	cache, err := os.UserCacheDir()
+	installHere := *install
+	var apiKey string
+	if remote != nil {
+		// The machines install what their jobs need; nothing is installed here.
+		installHere = "none"
+		if err := validInstall(*install); err != nil {
+			return false, err
+		}
+		if apiKey, err = remote.check(); err != nil {
+			return false, err
+		}
+		if !parallelSet {
+			*parallel = 8
+		}
+	}
+	rt, err := newRunEnv(cat, installHere)
 	if err != nil {
 		return false, err
 	}
-	cache = filepath.Join(cache, "raccoonci")
+	cache := rt.cacheDir
 	if *workDir == "" {
 		*workDir = filepath.Join(cache, "runs", time.Now().Format("20060102-150405"))
 	}
@@ -127,28 +146,7 @@ func runWorkflow(args []string, cat *catalog.Catalog) (ok bool, err error) {
 		github = github.Set("event", ev.(value.Object).Set("inputs", inputObj))
 	}
 	repository, _ := github.Get("repository")
-	node := nodejs.New(filepath.Join(cache, "node"))
-	node.Catalog = cat
-	// For job containers on musl images (Alpine). Inside node.Dir, so the
-	// mount below covers it.
-	nodeMusl := nodejs.NewMusl(filepath.Join(node.Dir, "musl"))
-	nodeMusl.Catalog = cat
 	printer := &local.Printer{Out: os.Stdout, Debug: *debug}
-
-	toolCache := filepath.Join(cache, "toolcache")
-	var prov *provision.Provisioner
-	switch *install {
-	case "none":
-	case "toolchains", "all":
-		prov = &provision.Provisioner{ToolCache: toolCache, Catalog: cat, Installers: provision.DefaultInstallers(nil)}
-		if *install == "all" {
-			if prov.Apt, err = provision.NewApt(); err != nil {
-				fmt.Fprintf(os.Stderr, "raccoonci: -install=all: %v; missing packages will only be reported\n", err)
-			}
-		}
-	default:
-		return false, fmt.Errorf("-install %q: want none, toolchains or all", *install)
-	}
 	// The scan reads version files from the repo; confine it to the repo, even
 	// through symlinks.
 	repoDir, err := os.OpenRoot(repo)
@@ -160,34 +158,64 @@ func runWorkflow(args []string, cat *catalog.Catalog) (ok bool, err error) {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	runID, _ := github.Get("run_id")
+	var serve *publicServe
+	var rr *remoteRun
+	if remote != nil {
+		ctl := &dispatch.Controller{}
+		serve = &publicServe{listen: remote.listen, publicURL: remote.controllerURL,
+			mount: map[string]http.Handler{"/v1/": ctl.Handler()}}
+		rr = newRemoteRun(&instabox.Provider{
+			Client:        &instabox.Client{Key: apiKey, URL: os.Getenv("INSTABOX_API_URL")},
+			Controller:    ctl,
+			ControllerURL: remote.controllerURL,
+			Snapshot:      remote.snapshot,
+			StartAgent:    remote.startAgent,
+			Logf:          func(f string, a ...any) { fmt.Fprintf(os.Stderr, "raccoonci: "+f+"\n", a...) },
+		})
+		rel, err := filepath.Rel(repo, absPath(path))
+		if err != nil || strings.HasPrefix(rel, "..") {
+			return false, fmt.Errorf("%s is outside its repository %s", path, repo)
+		}
+		rr.workflow, rr.github, rr.vars, rr.inputs = filepath.ToSlash(rel), github, varObj, inputObj
+		rr.secrets, rr.install, rr.event = secretValues, *install, printer.Event
+		if rr.sourceTar, err = makeSourceTar(repo, *workDir); err != nil {
+			return false, fmt.Errorf("packing the source: %w", err)
+		}
+	}
 	svc, err := localServices(filepath.Join(*workDir, "_artifacts"),
-		filepath.Join(cache, "actions-cache", repoDirName(repository.(string))), runID.(string), *cacheProtocol == "v2", int64(*cacheLimitGB)<<30)
+		filepath.Join(cache, "actions-cache", repoDirName(repository.(string))), runID.(string), *cacheProtocol == "v2", int64(*cacheLimitGB)<<30, serve)
 	if err != nil {
 		return false, fmt.Errorf("artifact service: %w", err)
 	}
 	defer svc.stop()
+	var remoteFn func(context.Context, engine.RemoteInstance) (runner.Result, error)
+	if rr != nil {
+		rr.env = svc.env
+		remoteFn = rr.run
+	}
 
 	fmt.Printf("running %s in %s\n", path, *workDir)
 	res, err := engine.Run(ctx, w, engine.Options{
+		Remote:      remoteFn,
 		Github:      github,
 		Secrets:     secretValues,
 		Vars:        varObj,
 		Inputs:      inputObj,
 		Images:      images,
 		Catalog:     cat,
-		Provision:   prov,
+		Provision:   rt.prov,
 		Repo:        repoDir.FS(),
 		WorkDir:     *workDir,
 		Jobs:        jobs,
 		MaxParallel: *parallel,
 		Runner: runner.Config{
-			ToolCache: toolCache,
+			ToolCache: rt.toolCache,
 			Actions:   actions.NewStore(filepath.Join(*workDir, "_actions"), secretValues["GITHUB_TOKEN"]),
-			Node:      node.Binary,
-			NodeMusl:  nodeMusl.Binary,
+			Node:      rt.node.Binary,
+			NodeMusl:  rt.nodeMusl.Binary,
 			// Container jobs reach the Node.js runtimes and the downloaded
 			// actions at the same paths as the host.
-			Mounts:            []string{node.Dir, filepath.Join(*workDir, "_actions")},
+			Mounts:            []string{rt.node.Dir, filepath.Join(*workDir, "_actions")},
 			Checkout:          local.Checkout(repo, repository.(string)),
 			ServiceEnv:        svc.env,
 			ContainerServices: svc.serveNetwork,
@@ -203,6 +231,13 @@ func runWorkflow(args []string, cat *catalog.Catalog) (ok bool, err error) {
 		fmt.Printf("%-8s %s\n", j.Conclusion, j.ID)
 	}
 	return res.Conclusion == runner.Success, nil
+}
+
+func absPath(p string) string {
+	if abs, err := filepath.Abs(p); err == nil {
+		return abs
+	}
+	return p
 }
 
 func keyValues(flagName string, list []string) (value.Object, error) {
@@ -250,14 +285,28 @@ type services struct {
 	stop    func()
 }
 
+// publicServe makes localServices serve for machines elsewhere: on a chosen
+// listen address, with every link and environment value built on the https
+// address those machines reach it at (publicURL, for example a published
+// port), and more handlers mounted next to the services (the dispatch
+// controller's). Every route is guarded by a token or signed URL; none is open.
+type publicServe struct {
+	listen, publicURL string
+	mount             map[string]http.Handler
+}
+
 // localServices serves the runtime services on one loopback port. Artifacts
 // live under artifactDir, for this run; cache entries under cacheDir, which
 // outlives it.
 //
 // A cache that cannot start is reported and left out: jobs then run without
 // one, as actions/cache does when the service is missing.
-func localServices(artifactDir, cacheDir, runID string, cacheV2 bool, cacheLimit int64) (*services, error) {
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+func localServices(artifactDir, cacheDir, runID string, cacheV2 bool, cacheLimit int64, serve *publicServe) (*services, error) {
+	listen := "127.0.0.1:0"
+	if serve != nil {
+		listen = serve.listen
+	}
+	ln, err := net.Listen("tcp", listen)
 	if err != nil {
 		return nil, err
 	}
@@ -267,6 +316,9 @@ func localServices(artifactDir, cacheDir, runID string, cacheV2 bool, cacheLimit
 		return nil, err
 	}
 	base := "http://" + ln.Addr().String()
+	if serve != nil {
+		base = serve.publicURL // machines reach the services there, not at the listener's address
+	}
 	signer, err := artifact.NewSigner(key)
 	if err != nil {
 		ln.Close()
@@ -313,6 +365,11 @@ func localServices(artifactDir, cacheDir, runID string, cacheV2 bool, cacheLimit
 		}
 	}
 
+	if serve != nil {
+		for prefix, h := range serve.mount {
+			mux.Handle(prefix, h)
+		}
+	}
 	// Only the artifact routes sit at "/"; the cache has its own prefix.
 	mux.Handle("/", artSvc.Handler())
 	handler := local.LogServerErrors(mux, func(format string, a ...any) {
