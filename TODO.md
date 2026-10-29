@@ -63,6 +63,7 @@ Node.js、Go、apt 包已经通了（见"已完成"）。还缺：
 - 🟡 Python：最新一期 python-build-standalone 只含每个小版本的最新补丁，且已不含 3.10 及更早。工作流若显式写 `3.10` 或某个旧补丁，现在会得到明确报错而不是安装；要支持就得去翻更早的发布（要用 GitHub API，有 60 次/小时的限制）
 - ⬜ Java（Temurin）、Ruby、Rust 的安装器
 - ⬜ 各种 CLI 工具的安装器：docker、gh、kubectl、helm、terraform、yarn、maven 等。目前只检查是否已在 PATH 上，缺了就警告
+- ✅ 采用机器自带的工具链：InstaBox 的 `universal` 模板自带 Go、Node 等。装环境前先按 catalog 的 `probe`（运行什么命令、从输出哪一段取版本号）探测，版本满足就把安装目录链接进 toolcache，不再下载。运行时探测，不写死模板里有什么。实测：全新缓存目录下跑自己的 CI，`go 1.27.1 (already on this machine)`，`setup-go` 直接 Found in cache。目前只给 node 和 go 配了 probe；Python 不采用系统版本（`setup-python` 要的布局不同），其余工具链（Rust、Java 等）还没有安装器也没有 probe
 - ⬜ 其他架构：toolcache 的 arch 目录已按机器架构命名，但只在 x64 上实测过
 - ⬜ 第三方 action 内部的依赖：composite/docker action 要下载 `action.yml` 才能扫描（现在只扫 workflow 本身）
 - ⬜ 运行时兜底：命令返回 127（command not found）时记录并提示，下次自动补装
@@ -137,6 +138,10 @@ Node.js、Go、apt 包已经通了（见"已完成"）。还缺：
 
 ## 四、工程与风险
 
-- ⬜ 用 Raccoon CI 自己跑自己的 `make check`（dogfood），同时也是第一个真实的端到端用例
-- ⬜ 兼容性语料：act 和 toolkit 的 workflow 文件**只验证了能解析**，整套跑起来的只有手写的小例子
+- ✅ 用 Raccoon CI 自己跑自己的 `make check`（dogfood）：`.github/workflows/ci.yml`（checkout、`setup-go` 用 `go-version-file`、gofmt、`make check`、`make build`、`upload-artifact`），在本机 1 分钟左右跑通。这次暴露并修复了一个真问题：缓存/artifact 服务暂存分块默认放在 `/tmp`，本机的 `/tmp` 是 2 GB 的 tmpfs，保存一份 Go 构建缓存（约 750 MB 压缩）时写满，服务端回 500，`actions/cache` 只报 “responded with 500” 和一串 EBADF。现在暂存目录放在缓存/artifact 仓库旁边的持久盘上（`azblob.NewSpoolDir`，每个进程一个私有子目录，超过一天的残留自动清理）
+- 🟡 兼容性语料：对 13 个真实开源项目的 90 个 workflow 文件跑了 `plan`，全部解析并展开通过。真正跑起来的有 `spf13/cobra` 的 `test-unix`（8 个 Go 版本 × ubuntu 全部通过，8 个 macOS 实例按设计明确失败）。**还没跑**：commander.js（Node，actions 用 commit SHA 固定）、click（Python + uv + tox）、express、需要 Rust 的项目（没有 Rust 安装器，语料里约 60 个实例需要它）
+- ⬜ 已知：同一台机器第二次跑时，`setup-go` 还原缓存会因为 `~/go/pkg/mod` 里已有的只读文件而报 “File exists”（tar 退出码 2，只是警告，job 照常成功）。这是长期使用的自托管机器上 `setup-go` 的已知行为，GitHub 的全新虚拟机不会遇到；对“用户自己的机器”这条路线会常见，需要想办法（例如每次 job 用干净的 HOME，或者还原前清理）
+- ✅ 服务端 5xx 的原因以前不会出现在任何日志里：现在 `raccoonci run` 会把 artifact/cache 服务的 5xx 连同原因打到 stderr（`local.LogServerErrors`，只记路径，不记签名）。靠它确认了 cobra 矩阵里 `1.22.x` 的缓存提交失败是 `no space left on device`（`/data` 最低剩 366 MiB）
+- ⬜ 缓存没有大小上限和淘汰，提交时还要在仓库目录里再写一份完整副本（暂存 + 仓库，瞬时 2 倍）：cobra 的 8 个 Go 版本各存一份约 855 MB 的 Go 缓存，仓库涨到 5.6 GB，20 GB 的盘就被写满了。需要总量上限 + LRU 淘汰，提交前检查剩余空间并给出明确报错；`Dir` 仓库可以直接把暂存文件改名进仓库，省掉那份拷贝
+- ✅ 引擎：不可用 OS 的实例不再占并发槽位排队，立即失败（实测 cobra 的 8 个 macOS 实例一开始就全部报错）
 - 🟡 硬编码原则：evolving 的名单都已进 catalog；GitHub 协议本身（字段名、workflow 命令名、上限）和下载地址有意留在代码里，原因见 `CLAUDE.md`
