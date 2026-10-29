@@ -32,6 +32,8 @@ commands:
   plan <workflow.yml>                parse a workflow and list its jobs, matrix combinations
                                      and what each run needs installed
   run [flags] <workflow.yml>         run a workflow on this machine (raccoonci run -h for flags)
+  agent [flags]                      on a machine a controller sends jobs to: wait for
+                                     ~/.raccoonci-agent.json, run the job it names
   catalog update                     pull the catalog feed now (needs -catalog-url)
   runner-images update <dir>         fetch what GitHub's Ubuntu runner images preinstall into
                                      snapshot files (uses GITHUB_TOKEN for the API fallback if set)
@@ -80,10 +82,18 @@ func main() {
 		err = printPlan(os.Stdout, args[1], cat)
 	case len(args) >= 1 && args[0] == "run":
 		var ok bool
-		ok, err = runWorkflow(args[1:], cat)
+		if rf, rest, serr := splitRemote(args[1:]); serr != nil {
+			err = serr
+		} else if rf.on != "" {
+			ok, err = runRemote(rf, rest)
+		} else {
+			ok, err = runWorkflow(args[1:], cat)
+		}
 		if err == nil && !ok {
 			os.Exit(1)
 		}
+	case len(args) >= 1 && args[0] == "agent":
+		err = runAgent(args[1:])
 	case len(args) == 3 && args[0] == "runner-images" && args[1] == "update":
 		err = updateRunnerImages(args[2], cat)
 	default:
