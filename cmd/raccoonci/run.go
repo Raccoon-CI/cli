@@ -31,6 +31,7 @@ import (
 	"raccoonci/internal/envsnap"
 	"raccoonci/internal/instabox"
 	"raccoonci/internal/local"
+	"raccoonci/internal/provision"
 	"raccoonci/internal/runner"
 	"raccoonci/internal/runnerimages"
 	"raccoonci/internal/value"
@@ -59,6 +60,7 @@ func runWorkflow(args []string, cat *catalog.Catalog, remote *remoteFlags) (ok b
 	cacheProtocol := fs.String("cache-protocol", "v1", "which actions/cache protocol to offer steps: v1 or v2 (both read and write the same entries)")
 	cacheLimitGB := fs.Int("cache-limit-gb", 10, "the most the cache of a repository may hold, in GiB (GitHub allows 10); the least recently used entries are evicted first; 0 means no limit")
 	envSnapshots := fs.Int("env-snapshots", 0, "with -on: keep up to this many environment snapshots per repository: after a successful run, a machine whose job installed dependencies (all lockfiles pinned) is saved, and later runs with the same lockfiles start from it; 0 turns it off")
+	toolCacheLimitGB := fs.Int("toolcache-limit-gb", 10, "the most the tool cache (Node.js, Go, Python... installed for jobs) may hold, in GiB; before a run, the versions used longest ago go first, but none used in the last 24 hours; 0 means no limit")
 	install := fs.String("install", "toolchains", "what to install for each job before it runs: none; toolchains (Node.js, Go... into the tool cache, which touches nothing else); or all (also apt packages, with sudo)")
 	fs.Usage = func() {
 		fmt.Fprintln(fs.Output(), "usage: raccoonci run [flags] <workflow.yml>")
@@ -127,6 +129,15 @@ func runWorkflow(args []string, cat *catalog.Catalog, remote *remoteFlags) (ok b
 	rt, err := newRunEnv(cat, installHere)
 	if err != nil {
 		return false, err
+	}
+	if installHere != "none" {
+		removed, perr := provision.Prune(rt.toolCache, int64(*toolCacheLimitGB)<<30, 24*time.Hour, time.Now())
+		if perr != nil {
+			fmt.Fprintf(os.Stderr, "raccoonci: tool cache cleanup: %v\n", perr)
+		}
+		if len(removed) > 0 {
+			fmt.Fprintf(os.Stderr, "raccoonci: tool cache is over %d GiB; removed %s\n", *toolCacheLimitGB, strings.Join(removed, ", "))
+		}
 	}
 	cache := rt.cacheDir
 	if *workDir == "" {

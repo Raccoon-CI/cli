@@ -58,7 +58,7 @@
 
 ### 3.1 装环境——剩余部分
 
-Node.js、Go、apt 包已经通了（见"已完成"）。还缺：
+Node.js、Go、Python、Java、Rust、apt 包已经通了（见"已完成"和下面的条目）。还缺：
 
 - 🟡 Python：最新一期 python-build-standalone 只含每个小版本的最新补丁，且已不含 3.10 及更早。工作流若显式写 `3.10` 或某个旧补丁，现在会得到明确报错而不是安装；要支持就得去翻更早的发布（要用 GitHub API，有 60 次/小时的限制）
 - ✅ Java（Temurin，Adoptium 接口）和 Rust（static.rust-lang.org 的 rustc/cargo/rust-std/rustfmt/clippy 组件包，逐个校验 SHA-256 后用各自的 install.sh 装）的安装器（2026-10-29）。两者在 catalog 里标了 `implicit-only`：`setup-java`、rustup 自己会下载，预填 tool cache 它们不会读，所以只给“没写 setup 就直接用 `cargo`/`java`/`mvn`”的 job 装。真实网络实测：一个 job 隐式用 cargo、rustc、cargo fmt、java，11 s 装好。Rust 只支持 `stable` 和精确版本（1.80、1.80.0），Java 只支持主版本和精确版本（17、17.0.9、1.8），范围写法（`>=1.70`、`lts`）不支持；没有探测机器自带的 Rust 和 Java，总是下载
@@ -71,7 +71,7 @@ Node.js、Go、apt 包已经通了（见"已完成"）。还缺：
 - ⬜ 第三方 action 内部的依赖：composite/docker action 要下载 `action.yml` 才能扫描（现在只扫 workflow 本身）
 - ⬜ 运行时兜底：命令返回 127（command not found）时记录并提示，下次自动补装
 - ⬜ 下载镜像配置（国内访问 GitHub / nodejs.org / go.dev 慢）。用本地配置或环境变量，**不放进 catalog feed**
-- ⬜ 工具链缓存清理（旧版本只增不减）。实测一套 node/go/python 就有 1GB，在 InstaBox 的 `/tmp`（2GB tmpfs）上会把盘占满，工具缓存应放在 `/data` 之类的持久盘上，并设上限
+- 🟡 工具链缓存清理（2026-10-29）：`raccoonci run -toolcache-limit-gb N`（默认 10，0 为不限），本机运行开始时按“最久没用”淘汰版本，直到不超上限；24 小时内用过的不删，所以上限是软的。“最近使用”记在 `.complete` 标记的修改时间上，每次选中某个版本都刷新；超过 24 小时的中断安装残留（`.part-*` 等）顺手清掉；采用的机器自带版本只是一串链接，不计大小。工具缓存在用户缓存目录（InstaBox 上是 `/data/home/.cache`，持久盘），不在 `/tmp`。**没做**：远程模式下机器上的缓存不清理（每台机器用完即删）；`node/`（Node.js 运行时，实测 750 MB）和 `runs/`（工作目录，765 MB，只增不减）不在这个上限里；只在运行开始时清一次，一次运行里装的东西不会在运行中被淘汰；setup-* 动作自己写进工具缓存的版本也会被淘汰，下次由它们重新下载
 
 ### 3.2 运行时服务（GHA action 依赖的内部接口）
 
