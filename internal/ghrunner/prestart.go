@@ -1,0 +1,276 @@
+package ghrunner
+
+import (
+	"context"
+	"fmt"
+	"strings"
+	"time"
+
+	"raccoonci/internal/sched"
+	"raccoonci/internal/trigger"
+	"raccoonci/internal/workflow"
+)
+
+// Some jobs are known to be coming: a scheduled workflow at its cron time, the
+// jobs that need a job that is running. A runner started for them just before
+// they arrive costs a few seconds of a machine and saves the whole start-up, so
+// no keep-alive policy is needed for them.
+
+// expectation is a runner that will be wanted at a known time.
+type expectation struct {
+	key     string
+	repo    string
+	at      time.Time // when the job is expected to be queued
+	count   int
+	why     string
+	until   time.Time // keep the runner at least until
+	started bool
+}
+
+// labelsOf lists the labels a job's runs-on names, when they are literal.
+func labelsOf(runsOn any) []string {
+	switch v := runsOn.(type) {
+	case string:
+		return []string{v}
+	case []any:
+		var out []string
+		for _, e := range v {
+			if s, ok := e.(string); ok {
+				out = append(out, s)
+			}
+		}
+		return out
+	}
+	return nil
+}
+
+func (s *Service) isOurs(j *workflow.Job) bool {
+	for _, l := range labelsOf(j.RunsOn) {
+		if strings.HasPrefix(strings.ToLower(l), s.prefix()) {
+			return true
+		}
+	}
+	return false
+}
+
+// displayName is what the API calls a job: its name, else its id.
+func displayName(j *workflow.Job) string {
+	if j.Name != "" && !strings.Contains(j.Name, "${{") {
+		return j.Name
+	}
+	return j.ID
+}
+
+// matches reports whether an API job (name "build" or "test (1.22, linux)") is an
+// instance of the workflow's job.
+func matches(apiName string, j *workflow.Job) bool {
+	d := displayName(j)
+	return apiName == d || strings.HasPrefix(apiName, d+" (")
+}
+
+func (s *Service) addExpectation(e *expectation) {
+	e.repo = s.poolOf(e.repo) // the pool whose runner is wanted
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, x := range s.expected {
+		if x.key == e.key {
+			return
+		}
+	}
+	s.expected = append(s.expected, e)
+}
+
+// workflowFile reads and parses a workflow of repo at ref, remembered.
+func (s *Service) workflowFile(ctx context.Context, repo, path, ref string) *workflow.Workflow {
+	key := repo + "\x00" + path + "\x00" + ref
+	s.mu.Lock()
+	if w, ok := s.wfCache[key]; ok {
+		s.mu.Unlock()
+		return w
+	}
+	s.mu.Unlock()
+	var w *workflow.Workflow
+	if b, err := s.GH.FileContent(ctx, repo, path, ref); err == nil {
+		w, _ = workflow.Parse(b)
+	}
+	s.mu.Lock()
+	if s.wfCache == nil {
+		s.wfCache = map[string]*workflow.Workflow{}
+	}
+	s.wfCache[key] = w
+	s.mu.Unlock()
+	return w
+}
+
+// refreshSchedules looks at the repository's workflows for cron schedules and
+// expects a runner at each next fire time.
+func (s *Service) refreshSchedules(ctx context.Context, repo string) {
+	wfs, err := s.GH.ListWorkflows(ctx, repo)
+	if err != nil {
+		return
+	}
+	for _, f := range wfs {
+		if f.State != "active" {
+			continue
+		}
+		w := s.workflowFile(ctx, repo, f.Path, "")
+		if w == nil {
+			continue
+		}
+		crons, err := trigger.Schedules(w.On)
+		if err != nil || len(crons) == 0 {
+			continue
+		}
+		first := 0 // jobs that start the workflow
+		for _, j := range w.Jobs {
+			if len(j.Needs) == 0 && s.isOurs(j) {
+				first++
+			}
+		}
+		if first == 0 {
+			continue
+		}
+		for _, expr := range crons {
+			c, err := ParseCron(expr)
+			if err != nil {
+				continue
+			}
+			next := c.Next(time.Now())
+			if next.IsZero() {
+				continue
+			}
+			s.addExpectation(&expectation{
+				key:  repo + "|" + f.Path + "|" + expr + "|" + next.Format(time.RFC3339),
+				repo: repo, at: next, count: first, why: "schedule " + expr,
+				// GitHub starts scheduled runs late, often by minutes.
+				until: next.Add(10 * time.Minute),
+			})
+		}
+	}
+}
+
+// observeRun learns from the jobs of a run in progress: how long they take, and
+// which of its jobs will be queued when the ones running now finish.
+func (s *Service) observeRun(ctx context.Context, repo string, run Run, jobs []Job) {
+	if s.Durations != nil {
+		for _, j := range jobs {
+			if j.Status == "completed" && !j.StartedAt.IsZero() {
+				s.mu.Lock()
+				done := s.recorded[j.ID]
+				if s.recorded == nil {
+					s.recorded = map[int64]bool{}
+				}
+				s.recorded[j.ID] = true
+				s.mu.Unlock()
+				if !done && j.Conclusion == "success" {
+					s.Durations.Record(sched.Key(repo, j.Name), j.CompletedAt.Sub(j.StartedAt))
+				}
+			}
+		}
+	}
+	if run.Status != "in_progress" || s.Durations == nil {
+		return
+	}
+	info, err := s.GH.GetRun(ctx, repo, run.ID)
+	if err != nil || info.Path == "" {
+		return
+	}
+	path, _, _ := strings.Cut(info.Path, "@")
+	w := s.workflowFile(ctx, repo, path, info.HeadSHA)
+	if w == nil {
+		return
+	}
+	for _, d := range w.Jobs {
+		if len(d.Needs) == 0 || !s.isOurs(d) {
+			continue
+		}
+		listed := false
+		for _, j := range jobs {
+			listed = listed || matches(j.Name, d)
+		}
+		if listed {
+			continue // already queued or running: the scan has it
+		}
+		var ready time.Time
+		known := true
+		for _, need := range d.Needs {
+			nj := w.Job(need)
+			if nj == nil {
+				known = false
+				break
+			}
+			seen := false
+			for _, j := range jobs {
+				if !matches(j.Name, nj) {
+					continue
+				}
+				seen = true
+				var at time.Time
+				if j.Status == "completed" {
+					at = j.CompletedAt
+				} else {
+					est, ok := s.Durations.Estimate(sched.Key(repo, j.Name))
+					if !ok {
+						known = false
+						break
+					}
+					start := j.StartedAt
+					if start.IsZero() {
+						start = time.Now()
+					}
+					at = start.Add(est)
+				}
+				if at.After(ready) {
+					ready = at
+				}
+			}
+			if !seen || !known {
+				known = false // the job it needs has not started: nothing to predict from
+				break
+			}
+		}
+		if !known || ready.IsZero() {
+			continue
+		}
+		s.addExpectation(&expectation{
+			key:  fmt.Sprintf("%s|run|%s|%d", repo, displayName(d), run.ID),
+			repo: repo, at: ready, count: 1, why: "needs of " + displayName(d),
+			until: ready.Add(90 * time.Second),
+		})
+	}
+}
+
+// prestart starts the runners that expectations call for, a start-up ahead of
+// the time they are expected.
+func (s *Service) prestart(ctx context.Context, repo string) {
+	lead := time.Duration(s.leadSeconds() * float64(time.Second))
+	now := time.Now()
+	s.mu.Lock()
+	var due []*expectation
+	keep := s.expected[:0]
+	for _, e := range s.expected {
+		if now.After(e.until) {
+			continue // too late to matter
+		}
+		keep = append(keep, e)
+		if e.repo == repo && !e.started && now.After(e.at.Add(-lead)) {
+			e.started = true
+			due = append(due, e)
+		}
+	}
+	s.expected = keep
+	s.mu.Unlock()
+	for _, e := range due {
+		s.logf("%s: starting %d runner(s) ahead of time (%s, expected %s)", repo, e.count, e.why, e.at.Format("15:04:05"))
+		for range e.count {
+			s.startFor(ctx, repo, nil, 1, now, e.until)
+		}
+	}
+}
+
+func (s *Service) leadSeconds() float64 {
+	if s.KeepAlive != nil && s.KeepAlive.R > 0 {
+		return s.KeepAlive.R
+	}
+	return 8
+}

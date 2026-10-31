@@ -1,14 +1,18 @@
 package ghrunner
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"time"
 
 	"raccoonci/internal/instabox"
+	"raccoonci/internal/sched"
+	"raccoonci/internal/workflow"
 )
 
 const (
@@ -28,15 +32,28 @@ type Service struct {
 	P  *instabox.Provider
 	// Repos are the repositories to watch (owner/name).
 	Repos []string
+	// Org, if set, registers the runners with this organization instead of with
+	// one repository each: a waiting runner then takes a job of any of Repos, so
+	// one pool serves them all and keeps fewer machines idle than a pool each.
+	// The organization's default runner group must be open to the repositories.
+	Org string
 	// LabelPrefix selects the jobs: those with a runs-on label starting with it
 	// (compared lower-case). Default "raccoon-".
 	LabelPrefix string
 	// RunnerLabel is the label of the runners started to wait or to serve a job
 	// that has none better. Default LabelPrefix + "4vcpu".
 	RunnerLabel string
-	// Idle is how many runners to keep waiting, per repository. Zero starts
-	// runners only when a job is waiting.
+	// Idle is how many runners to keep waiting at least, per repository. Zero
+	// starts runners only when a job is waiting, or, with KeepAlive, when its
+	// policy or a known job says so.
 	Idle int
+	// KeepAlive, if set, decides how many more to keep waiting after jobs have
+	// come, from how this repository's jobs have been arriving.
+	KeepAlive *KeepAlive
+	// Durations, if set, remembers how long jobs take, so the jobs that need a
+	// running one can be given a runner just before it finishes. Without it
+	// only scheduled workflows are anticipated.
+	Durations *sched.History
 	// Poll is how often a repository is asked for waiting jobs (answers that
 	// have not changed are free). Default 1 s. A webhook would replace this.
 	Poll time.Duration
@@ -55,6 +72,10 @@ type Service struct {
 	served    map[int64]*serving // job id -> who is on it
 	live      map[*liveRunner]bool
 	launching map[string]int // repo -> runners being started
+	expected  []*expectation
+	wfCache   map[string]*workflow.Workflow
+	recorded  map[int64]bool // jobs whose duration is in Durations
+	arrived   map[int64]bool // runs counted as an arrival
 	sem       chan struct{}
 	wg        sync.WaitGroup
 	topUpMu   sync.Mutex
@@ -79,12 +100,30 @@ type liveRunner struct {
 	resumed  bool
 	busy     bool // it has a job
 	jobBased bool // started for a job (given up on if no job comes)
+	jobID    int64
+	jobRepo  string // where the job is, which can differ from repo (an organization)
+	// keepUntil: a runner started for a known job is not retired before then.
+	keepUntil time.Time
+	retire    bool // asked to stop waiting
 }
+
+// takenCheckAfter is how long a runner started for a job waits before asking
+// whether another runner has taken the job.
+var takenCheckAfter = 10 * time.Second
 
 func (s *Service) logf(format string, args ...any) {
 	if s.Logf != nil {
 		s.Logf(format, args...)
 	}
+}
+
+// poolOf names the pool of runners that serve repo: the repository itself, or
+// the organization when runners are shared.
+func (s *Service) poolOf(repo string) string {
+	if s.Org != "" {
+		return OrgScope + s.Org
+	}
+	return repo
 }
 
 func (s *Service) prefix() string {
@@ -115,8 +154,13 @@ func (s *Service) Run(ctx context.Context) error {
 	s.served = map[int64]*serving{}
 	s.live = map[*liveRunner]bool{}
 	s.launching = map[string]int{}
-	for _, r := range s.Repos {
-		s.wg.Go(func() { s.watch(ctx, r) })
+	s.arrived = map[int64]bool{}
+	if s.Org != "" {
+		s.wg.Go(func() { s.watch(ctx, s.Repos) }) // one pool: one loop, so its idle runners are counted once
+	} else {
+		for _, r := range s.Repos {
+			s.wg.Go(func() { s.watch(ctx, []string{r}) })
+		}
 	}
 	s.requestTopUp(ctx)
 	<-ctx.Done()
@@ -125,17 +169,30 @@ func (s *Service) Run(ctx context.Context) error {
 	return nil
 }
 
-func (s *Service) watch(ctx context.Context, repo string) {
+// watch serves repos, which share one pool of runners.
+func (s *Service) watch(ctx context.Context, repos []string) {
+	pool := s.poolOf(repos[0])
 	poll := s.Poll
 	if poll <= 0 {
 		poll = time.Second
 	}
-	s.logf("watching %s for jobs labelled %s* (keeping %d runners waiting)", repo, s.prefix(), s.Idle)
+	s.logf("watching %s for jobs labelled %s* (runners of %s; keeping %d waiting)", strings.Join(repos, ", "), s.prefix(), pool, s.Idle)
 	tick := time.NewTicker(poll)
 	defer tick.Stop()
+	var lastSchedules time.Time
 	for {
-		s.scan(ctx, repo)
-		s.keepIdle(ctx, repo)
+		if time.Since(lastSchedules) > 10*time.Minute {
+			lastSchedules = time.Now()
+			for _, repo := range repos {
+				s.refreshSchedules(ctx, repo)
+			}
+		}
+		free := s.idleCount(pool)
+		for _, repo := range repos {
+			s.scan(ctx, repo, &free)
+		}
+		s.prestart(ctx, pool)
+		s.keepIdle(ctx, pool)
 		select {
 		case <-ctx.Done():
 			return
@@ -158,16 +215,48 @@ func (s *Service) idleCount(repo string) int {
 	return n
 }
 
-// keepIdle starts runners until Idle of them wait.
-func (s *Service) keepIdle(ctx context.Context, repo string) {
-	for need := s.Idle - s.idleCount(repo); need > 0 && ctx.Err() == nil; need-- {
-		s.startFor(ctx, repo, nil, 1, time.Now())
+// idleTarget is how many runners repo should have waiting now.
+func (s *Service) idleTarget(repo string) int {
+	n := s.Idle
+	if s.KeepAlive != nil {
+		n = max(n, s.KeepAlive.Target(repo, time.Now()))
 	}
+	return n
+}
+
+// keepIdle brings the runners waiting for repo to the target: more are started,
+// and surplus ones that no known job needs any more are let go.
+func (s *Service) keepIdle(ctx context.Context, repo string) {
+	target := s.idleTarget(repo)
+	have := s.idleCount(repo)
+	for need := target - have; need > 0 && ctx.Err() == nil; need-- {
+		s.startFor(ctx, repo, nil, 1, time.Now(), time.Time{})
+	}
+	if have <= target {
+		return
+	}
+	// Retire the oldest waiting runners that are past their keep-until time.
+	now := time.Now()
+	s.mu.Lock()
+	var surplus []*liveRunner
+	for l := range s.live {
+		if l.repo == repo && !l.busy && !l.jobBased && !l.retire && now.After(l.keepUntil) {
+			surplus = append(surplus, l)
+		}
+	}
+	slices.SortFunc(surplus, func(a, b *liveRunner) int { return a.started.Compare(b.started) })
+	for i := 0; i < len(surplus) && have-i > target; i++ {
+		surplus[i].retire = true
+	}
+	s.mu.Unlock()
 }
 
 // scan starts a runner for every waiting job of ours that no waiting runner is
 // expected to take.
-func (s *Service) scan(ctx context.Context, repo string) {
+//
+// free is how many waiting runners have no job yet; it is shared by the
+// repositories of one pool, whose runners can take a job of any of them.
+func (s *Service) scan(ctx context.Context, repo string, free *int) {
 	runs, err := s.GH.ActiveRuns(ctx, repo)
 	if err != nil {
 		if ctx.Err() == nil {
@@ -175,7 +264,6 @@ func (s *Service) scan(ctx context.Context, repo string) {
 		}
 		return
 	}
-	free := s.idleCount(repo)
 	for _, run := range runs {
 		jobs, err := s.GH.RunJobs(ctx, repo, run.ID)
 		if err != nil {
@@ -184,6 +272,8 @@ func (s *Service) scan(ctx context.Context, repo string) {
 			}
 			continue
 		}
+		s.observeRun(ctx, repo, run, jobs)
+		s.noteArrival(repo, run, jobs)
 		for _, j := range jobs {
 			if j.Status != "queued" || !j.HasLabelPrefix(s.prefix()) {
 				continue
@@ -197,8 +287,8 @@ func (s *Service) scan(ctx context.Context, repo string) {
 			case sv != nil && time.Since(sv.at) < 20*time.Second:
 				s.mu.Unlock() // a waiting runner should take it any moment
 				continue
-			case sv == nil && free > 0:
-				free-- // an idle runner will take it
+			case sv == nil && *free > 0:
+				*free-- // an idle runner will take it
 				s.served[j.ID] = &serving{at: time.Now(), waiting: true}
 				s.mu.Unlock()
 				continue
@@ -215,14 +305,40 @@ func (s *Service) scan(ctx context.Context, repo string) {
 			s.served[j.ID] = &serving{attempts: attempts, at: time.Now()}
 			s.mu.Unlock()
 			job := j
-			s.startFor(ctx, repo, &job, attempts+1, time.Now())
+			job.Repo = repo
+			s.startFor(ctx, s.poolOf(repo), &job, attempts+1, time.Now(), time.Time{})
 		}
 	}
 }
 
-// startFor starts a machine and a runner in the background: for job if given,
-// else to wait.
-func (s *Service) startFor(ctx context.Context, repo string, job *Job, attempt int, seen time.Time) {
+// noteArrival tells the keep-alive policy that a run asked for our runners: once
+// per run, at the time of its first job, and only for runs somebody started
+// (a scheduled run is known in advance and says nothing about activity).
+func (s *Service) noteArrival(repo string, run Run, jobs []Job) {
+	if s.KeepAlive == nil || run.Event == "schedule" {
+		return
+	}
+	var first time.Time
+	for _, j := range jobs {
+		if j.HasLabelPrefix(s.prefix()) && (first.IsZero() || j.CreatedAt.Before(first)) {
+			first = j.CreatedAt
+		}
+	}
+	if first.IsZero() {
+		return
+	}
+	s.mu.Lock()
+	seen := s.arrived[run.ID]
+	s.arrived[run.ID] = true
+	s.mu.Unlock()
+	if !seen {
+		s.KeepAlive.Arrival(s.poolOf(repo), first)
+	}
+}
+
+// startFor starts a machine and a runner of pool (a repository, or an
+// organization) in the background: for job if given, else to wait.
+func (s *Service) startFor(ctx context.Context, repo string, job *Job, attempt int, seen time.Time, keepUntil time.Time) {
 	s.mu.Lock()
 	s.launching[repo]++
 	s.mu.Unlock()
@@ -240,6 +356,7 @@ func (s *Service) startFor(ctx context.Context, repo string, job *Job, attempt i
 		s.mu.Lock()
 		s.launching[repo]--
 		if err == nil {
+			l.keepUntil = keepUntil
 			s.live[l] = true
 		}
 		s.mu.Unlock()
@@ -261,7 +378,7 @@ func (s *Service) startFor(ctx context.Context, repo string, job *Job, attempt i
 		outcome := s.follow(ctx, l)
 		s.retire(l)
 		if job != nil {
-			final, _ := s.GH.GetJob(context.WithoutCancel(ctx), repo, job.ID)
+			final, _ := s.GH.GetJob(context.WithoutCancel(ctx), cmp.Or(job.Repo, repo), job.ID)
 			s.logf("%s %s: %s; queued→started %.1fs, ran %.1fs, %s", repo, what, outcome,
 				final.StartedAt.Sub(final.CreatedAt).Seconds(), final.CompletedAt.Sub(final.StartedAt).Seconds(), final.Conclusion)
 		} else {
@@ -281,7 +398,10 @@ func (s *Service) launch(ctx context.Context, repo string, job *Job, attempt int
 	tl := timeline{seen: seen}
 	labels := []string{"self-hosted", s.runnerLabel()}
 	tag := fmt.Sprintf("idle-%d", time.Now().UnixNano()%1e9)
+	var jobID int64
+	var jobRepo string
 	if job != nil {
+		jobID, jobRepo = job.ID, job.Repo
 		labels = append([]string{"self-hosted"}, job.Labels...)
 		tag = fmt.Sprintf("%d-%d", job.ID, attempt)
 	}
@@ -329,7 +449,7 @@ func (s *Service) launch(ctx context.Context, repo string, job *Job, attempt int
 	}
 	tl.started = time.Now()
 	return &liveRunner{repo: repo, id: jr.jit.RunnerID, machine: id, use: use, name: "rc-" + tag,
-		started: tl.started, resumed: tl.resumed, jobBased: job != nil}, tl, nil
+		started: tl.started, resumed: tl.resumed, jobBased: job != nil, jobID: jobID, jobRepo: cmp.Or(jobRepo, repo)}, tl, nil
 }
 
 // follow watches the runner until its job is over: GitHub removes a
@@ -345,7 +465,7 @@ func (s *Service) follow(ctx context.Context, l *liveRunner) string {
 		limit = 6 * time.Hour
 	}
 	began := time.Now()
-	var busySince time.Time
+	var busySince, checked time.Time
 	for {
 		select {
 		case <-ctx.Done():
@@ -364,8 +484,26 @@ func (s *Service) follow(ctx context.Context, l *liveRunner) string {
 			l.busy = true
 			s.mu.Unlock()
 		}
+		s.mu.Lock()
+		stop := l.retire
+		s.mu.Unlock()
+		// Deleting the registration is what makes retiring safe: GitHub refuses it
+		// for a runner that has a job, and a runner that is gone can get none.
+		if stop && !r.Busy && busySince.IsZero() && s.GH.DeleteRunner(ctx, l.repo, l.id) == nil {
+			return "retired: no job expected"
+		}
 		if busySince.IsZero() && l.jobBased && time.Since(began) > idle {
 			return fmt.Sprintf("gave up: the runner took no job in %v", idle)
+		}
+		// Its job may have gone to another runner (one that was waiting): this one
+		// then has nothing to do, and every second of it is paid for.
+		if busySince.IsZero() && l.jobBased && !r.Busy && time.Since(began) > takenCheckAfter && time.Since(checked) > 5*time.Second {
+			checked = time.Now()
+			if j, err := s.GH.GetJob(ctx, l.jobRepo, l.jobID); err == nil && j.Status != "queued" && !r.Busy {
+				if s.GH.DeleteRunner(ctx, l.repo, l.id) == nil {
+					return "taken by another runner; this one is released"
+				}
+			}
 		}
 		if !busySince.IsZero() && time.Since(busySince) > limit {
 			return "gave up: the job ran past the time limit"

@@ -8,6 +8,7 @@ package ghrunner
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -102,6 +103,7 @@ func (c *Client) do(ctx context.Context, method, path string, body any, out any)
 type Run struct {
 	ID     int64  `json:"id"`
 	Status string `json:"status"`
+	Event  string `json:"event"`
 }
 
 // Job is one job of a run.
@@ -116,6 +118,8 @@ type Job struct {
 	CreatedAt   time.Time `json:"created_at"`
 	StartedAt   time.Time `json:"started_at"`
 	CompletedAt time.Time `json:"completed_at"`
+	// Repo is the repository the job was found in (set by the service).
+	Repo string `json:"-"`
 }
 
 // ActiveRuns lists the runs that are queued or in progress: the ones that can
@@ -150,6 +154,58 @@ func (c *Client) GetJob(ctx context.Context, repo string, id int64) (Job, error)
 	return j, err
 }
 
+// RunInfo is what a run says about itself.
+type RunInfo struct {
+	ID      int64  `json:"id"`
+	Status  string `json:"status"`
+	Event   string `json:"event"`
+	Path    string `json:"path"` // the workflow file, e.g. ".github/workflows/ci.yml@refs/heads/main"
+	HeadSHA string `json:"head_sha"`
+}
+
+// GetRun reads one run.
+func (c *Client) GetRun(ctx context.Context, repo string, id int64) (RunInfo, error) {
+	var r RunInfo
+	err := c.do(ctx, "GET", fmt.Sprintf("/repos/%s/actions/runs/%d", repo, id), nil, &r)
+	return r, err
+}
+
+// Workflow is a workflow file of a repository.
+type Workflow struct {
+	ID    int64  `json:"id"`
+	Path  string `json:"path"`
+	State string `json:"state"`
+}
+
+// ListWorkflows lists the repository's workflows.
+func (c *Client) ListWorkflows(ctx context.Context, repo string) ([]Workflow, error) {
+	var page struct {
+		Workflows []Workflow `json:"workflows"`
+	}
+	err := c.do(ctx, "GET", "/repos/"+repo+"/actions/workflows?per_page=100", nil, &page)
+	return page.Workflows, err
+}
+
+// FileContent returns a file of the repository at a ref (a branch or sha; empty
+// for the default branch).
+func (c *Client) FileContent(ctx context.Context, repo, path, ref string) ([]byte, error) {
+	p := "/repos/" + repo + "/contents/" + path
+	if ref != "" {
+		p += "?ref=" + ref
+	}
+	var f struct {
+		Content  string `json:"content"`
+		Encoding string `json:"encoding"`
+	}
+	if err := c.do(ctx, "GET", p, nil, &f); err != nil {
+		return nil, err
+	}
+	if f.Encoding != "base64" {
+		return nil, fmt.Errorf("github: %s has encoding %q", path, f.Encoding)
+	}
+	return base64.StdEncoding.DecodeString(strings.ReplaceAll(f.Content, "\n", ""))
+}
+
 // JIT is a runner registered just-in-time: it takes one job and is removed.
 type JIT struct {
 	RunnerID int64
@@ -158,7 +214,21 @@ type JIT struct {
 	Config string
 }
 
-// GenerateJIT registers a just-in-time runner for repo.
+// OrgScope names a whole organization where a repository name is expected: its
+// runners serve every repository of the organization.
+const OrgScope = "org:"
+
+// scopePath is the API path runners of a scope live under: /repos/o/r or /orgs/o.
+func scopePath(scope string) string {
+	if org, ok := strings.CutPrefix(scope, OrgScope); ok {
+		return "/orgs/" + org
+	}
+	return "/repos/" + scope
+}
+
+// GenerateJIT registers a just-in-time runner for a repository, or for an
+// organization (scope "org:name"), where it can take jobs of any repository
+// that may use the runner group.
 func (c *Client) GenerateJIT(ctx context.Context, repo, name string, labels []string) (JIT, error) {
 	var res struct {
 		Runner struct {
@@ -166,7 +236,7 @@ func (c *Client) GenerateJIT(ctx context.Context, repo, name string, labels []st
 		} `json:"runner"`
 		Config string `json:"encoded_jit_config"`
 	}
-	err := c.do(ctx, "POST", "/repos/"+repo+"/actions/runners/generate-jitconfig",
+	err := c.do(ctx, "POST", scopePath(repo)+"/actions/runners/generate-jitconfig",
 		map[string]any{"name": name, "runner_group_id": 1, "labels": labels, "work_folder": "_work"}, &res)
 	return JIT{RunnerID: res.Runner.ID, Config: res.Config}, err
 }
@@ -182,17 +252,36 @@ type Runner struct {
 // GetRunner reads a runner; NotFound once a just-in-time runner is gone.
 func (c *Client) GetRunner(ctx context.Context, repo string, id int64) (Runner, error) {
 	var r Runner
-	err := c.do(ctx, "GET", fmt.Sprintf("/repos/%s/actions/runners/%d", repo, id), nil, &r)
+	err := c.do(ctx, "GET", fmt.Sprintf("%s/actions/runners/%d", scopePath(repo), id), nil, &r)
 	return r, err
 }
 
 // DeleteRunner removes a runner (one that never took its job, say).
 func (c *Client) DeleteRunner(ctx context.Context, repo string, id int64) error {
-	err := c.do(ctx, "DELETE", fmt.Sprintf("/repos/%s/actions/runners/%d", repo, id), nil, nil)
+	err := c.do(ctx, "DELETE", fmt.Sprintf("%s/actions/runners/%d", scopePath(repo), id), nil, nil)
 	if errors.Is(err, NotFound) {
 		return nil
 	}
 	return err
+}
+
+// OrgRepos lists the full names of an organization's repositories that are not
+// archived (the first 100).
+func (c *Client) OrgRepos(ctx context.Context, org string) ([]string, error) {
+	var repos []struct {
+		FullName string `json:"full_name"`
+		Archived bool   `json:"archived"`
+	}
+	if err := c.do(ctx, "GET", "/orgs/"+org+"/repos?per_page=100", nil, &repos); err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, r := range repos {
+		if !r.Archived {
+			out = append(out, r.FullName)
+		}
+	}
+	return out, nil
 }
 
 // HasLabelPrefix reports whether the job asks for one of our labels.

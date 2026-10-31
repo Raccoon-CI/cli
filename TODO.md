@@ -1,6 +1,6 @@
 # Raccoon CI 进度与待办
 
-更新于 2026-10-28。`make check` 全绿。
+更新于 2026-10-31。`make check` 全绿。
 
 图例：✅ 完成　🟡 部分完成　⬜ 未开始
 
@@ -15,7 +15,8 @@
 | 3 | 单机执行器 | 🟡 | `run:`、JS/composite/Docker action、容器 job 和 `services:` 可用；可复用 workflow 不支持 |
 | 3.5 | 装环境（按扫描结果安装） | 🟡 | Node.js、Go、Python、Java、Rust、apt 包已通；Ruby 和各种 CLI 工具还没有安装器（见 3.1） |
 | 4 | artifact v4 + cache v1/v2 服务 | ✅ | 两者在本机运行里都用真实 action 实测通过；v3 REST、持久化/淘汰等见 3.2 |
-| 5 | InstaBox provider | ⬜ | |
+| 5 | InstaBox provider | 🟡 | 自己的引擎跑在 InstaBox 机器上已通（见 3.6）；缺服务端 |
+| 6 | GitHub 触发路径（`raccoonci serve`） | 🟡 | 2026-10-31 起。GitHub 触发并编排，`raccoon-*` 标签的 job 由 InstaBox `ci` 模板机器上的 GitHub runner 执行；保活、提前启动、组织级共享池都已实测；缺 webhook 和更大规模验证（见 3.7）。**和"自己的引擎"哪条是主线还没定** |
 
 ## 二、已完成
 
@@ -152,6 +153,25 @@ Node.js、Go、Python、Java、Rust、apt 包已经通了（见"已完成"和下
 - ⬜ 沙箱：job 现在直接以当前用户在本机运行，隔离完全依赖 provider 的虚拟机
 - ⬜ 来自 fork PR 的 workflow 的 secrets 策略
 - ⬜ catalog feed：默认地址（还没发布，**不能编一个**）、签名生成流程和工具
+
+### 3.7 GitHub 触发路径（`raccoonci serve`，`internal/ghrunner`）
+
+背景：2026-10-31 用户研究 Blacksmith 后认为"只用自己的引擎、不做 GitHub runner 编排"的判断可能有误，要求研究并做出这条路径。代码在 `internal/ghrunner`，命令 `raccoonci serve`，设计和数字见 `docs/research/idle-runners/README.md`，架构说明见 `CLAUDE.md`。InstaBox 的 `ci` 模板（Ubuntu 24.04 = GitHub 官方 runner 镜像，runner 2.338.2 未注册）已上线，所以操作系统和镜像不再是问题。
+
+- ✅ 主流程：按仓库轮询排队的 job（ETag 条件请求，304 不占额度）→ 标签前缀 `raccoon-` 的 job 生成 JIT runner + 起机器（并行）→ JIT 配置写进机器文件（0600，不进命令行和日志，测试断言）→ 跟到 GitHub 把 runner 删掉 → 删机器。真实跑通：job 成功，机密没有出现在日志里
+- ✅ 实测启动时间（GitHub 报告的 queued→started）：现建机器 10 s；暂停的备用机（`-warm N`）7–9 s；已在线的空闲 runner 1–2 s。对照：GitHub 托管 3–4 s，InstaBox 官方 `instabox-medium` 12–20 s
+- ✅ 自适应保活（`keepalive.go`）：模型和在真实到达轨迹上的比较见研究笔记。每隔一段到达的间隔，按最近 100 次间隔选使"等待成本 + 延迟价值"最小的 TTL，不到 20 次用 ski-rental 保本点 `V·Δ/C`；池大小跟随到达的突发规模（最多 4）；多余的等待 runner 先删注册再退役（有 job 的 runner GitHub 不让删，所以安全）。`-second-value`（默认 0.01 美元/秒，0 关闭）、`-idle N`（下限）
+- ✅ 已知到达提前启动（`prestart.go`、`cron.go`）：`schedule:` 的 cron 到点前 8 秒起 runner（保留到之后 10 分钟，GitHub 的定时 run 常晚几分钟）；`needs` 某个正在跑的 job 的下游 job，按上游最近几次时长的中位数在它结束前起 runner（没有历史就不猜）。真机：链式 a→b→c 第二次运行，b、c 排队到开始 2 s（第一次冷启动 a 16 s、因保活 b、c 也是 2 s）
+- ✅ 被别的等待 runner 抢走 job 的 runner 约 10 秒后释放（以前要白等 3 分钟的 `IdleTimeout`）。实测中发现并修复；真机上这个修复本身还没重跑过，只有单测
+- ✅ 组织级共享池（`-org`）：runner 登记在组织的 `Default` 组（私有仓库可用），一个仓库的突发留下的等待 runner 其他仓库也能用。真机：`bench-lint-docs` 的 job 之后，`bench-go-integration` 的 job 排队后 2 s 开始，用的是保留下来的 runner。只写 `-org` 不写 `-repo` 时监控组织里没归档的全部仓库
+- ⬜ **webhook 取代轮询**：需要 `admin:repo_hook`（仓库）或 `admin:org_hook`（组织）。现在一个池内顺序轮询各仓库，仓库多了一轮会很慢
+- ⬜ 公开仓库和互不信任的仓库不能共用一个池（组织级 runner 能接组内任何仓库带这些标签的 job）；还没有按信任分池
+- ⬜ 标签选机器规格：现在不管标签是什么都起 `ci` 模板默认规格（4 vCPU / 8 GiB），`raccoon-2vcpu`、`raccoon-8vcpu` 之类还不会换规格
+- ⬜ InstaBox 30 分钟自动挂起会不会把"有 runner 在监听的机器"当成空闲，没测
+- ⬜ 真实 `schedule:` 触发没测（cron 计算和提前启动只有单测）
+- ⬜ `actions/cache` 和 artifact 在这条路径上走 GitHub 自己的服务；能否重定向到 `internal/cache` 没试
+- ⬜ 完整对比：给另外 6 个 bench 仓库建 `bench-raccoon` 分支（现在只有 `bench-lint-docs`，加上为共享池测试建的 `bench-go-integration`），用 `raccoonbench` 对 GitHub 托管、`instabox-runner`、`serve` 重复跑；**基准价格文件里 GitHub 单价（$0.008/分钟）是旧的，报花费前要先改**。Blacksmith 和 Jog 因为要企业资质/预充 100 美元，已决定不比
+- ⬜ 清理：组织里有三个 `Blacksmith runners …` runner 组（之前试用留下的），`bench-frontend-e2e` 里还有分支 `blacksmith-migration-2b5b7fd`；等用户决定后再删
 
 ### 3.8 MVP 之后
 
