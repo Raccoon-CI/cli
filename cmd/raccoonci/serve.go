@@ -33,6 +33,9 @@ func serve(args []string) error {
 	warm := fs.Int("warm", 0, "keep this many machines paused and ready: a job then starts on a machine that resumes in under a second instead of one that is created")
 	idle := fs.Int("idle", 0, "always keep at least this many runners waiting per repository (a waiting runner is a running machine, about $1 a day); usually 0, and -second-value decides")
 	secondValue := fs.Float64("second-value", 0.01, "what a second of a job waiting to start is worth, in dollars: it sets how long runners are kept waiting after jobs have come (the break-even time is value x 8 s / the machine's cost per second, learned from each repository's own arrivals after 20 bursts); 0 turns the policy off. Scheduled workflows and jobs that need a running job get a runner just before they are due in any case")
+	hookListen := fs.String("webhook-listen", "", "address to receive GitHub's workflow_job webhooks on (for example 127.0.0.1:18091); the user publishes it, e.g. with instabox-port, and gives that address as -webhook-url. Each watched repository then gets a webhook pointing there (needs the admin:repo_hook scope), removed again when serve stops, and the repositories are listed only every -safety-poll instead of every -poll")
+	hookURL := fs.String("webhook-url", "", "the public https URL that reaches -webhook-listen")
+	safety := fs.Duration("safety-poll", 30*time.Second, "with webhooks: how often the repositories are listed anyway, for a delivery that never came")
 	maxJobs := fs.Int("max-jobs", 8, "how many jobs at once")
 	usageFile := fs.String("usage-file", "", "write what each machine used to this file, one JSON object per line, when the service stops")
 	fs.Usage = func() {
@@ -105,6 +108,17 @@ func serve(args []string) error {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	if *hookListen != "" || *hookURL != "" {
+		if *hookListen == "" || !strings.HasPrefix(*hookURL, "https://") {
+			return errors.New("-webhook-listen and an https -webhook-url go together")
+		}
+		stopHooks, err := startWebhooks(ctx, gh, s, repos, *hookListen, *hookURL, logf)
+		if err != nil {
+			return err
+		}
+		defer stopHooks()
+		s.Webhooks, s.SafetyPoll = true, *safety
+	}
 	err = s.Run(ctx)
 	reportUsage(p.Usage(), *usageFile)
 	return err

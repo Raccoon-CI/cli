@@ -57,6 +57,10 @@ type Service struct {
 	// Poll is how often a repository is asked for waiting jobs (answers that
 	// have not changed are free). Default 1 s. A webhook would replace this.
 	Poll time.Duration
+	// Webhooks says that GitHub delivers workflow_job events (see Webhook), so
+	// the repositories are listed only every SafetyPoll. Default 30 s.
+	Webhooks   bool
+	SafetyPoll time.Duration
 	// MaxJobs caps machines at once. Default 8.
 	MaxJobs int
 	// IdleTimeout is how long a runner started for a job may wait for it before
@@ -74,8 +78,10 @@ type Service struct {
 	launching map[string]int // repo -> runners being started
 	expected  []*expectation
 	wfCache   map[string]*workflow.Workflow
-	recorded  map[int64]bool // jobs whose duration is in Durations
-	arrived   map[int64]bool // runs counted as an arrival
+	recorded  map[int64]bool           // jobs whose duration is in Durations
+	arrived   map[int64]bool           // runs counted as an arrival
+	wake      map[string]chan struct{} // repo -> the loop that watches it
+	runCtx    context.Context          // set while Run runs; webhook deliveries start work under it
 	sem       chan struct{}
 	wg        sync.WaitGroup
 	topUpMu   sync.Mutex
@@ -87,6 +93,7 @@ type serving struct {
 	attempts int
 	at       time.Time
 	waiting  bool // an idle runner is expected to take it
+	pool     string
 }
 
 // liveRunner is a runner on a machine of ours.
@@ -150,36 +157,79 @@ func (s *Service) Run(ctx context.Context) error {
 	if n <= 0 {
 		n = 8
 	}
+	// Everything a webhook delivery touches is set up under the lock, runCtx last:
+	// a delivery that arrives before this is done is told the service is not
+	// running.
+	s.mu.Lock()
 	s.sem = make(chan struct{}, n)
 	s.served = map[int64]*serving{}
 	s.live = map[*liveRunner]bool{}
 	s.launching = map[string]int{}
 	s.arrived = map[int64]bool{}
+	s.wake = map[string]chan struct{}{}
+	type loop struct {
+		repos []string
+		wake  chan struct{}
+	}
+	var loops []loop
 	if s.Org != "" {
-		s.wg.Go(func() { s.watch(ctx, s.Repos) }) // one pool: one loop, so its idle runners are counted once
+		ch := make(chan struct{}, 1)
+		for _, r := range s.Repos {
+			s.wake[r] = ch
+		}
+		loops = append(loops, loop{s.Repos, ch}) // one pool: one loop, so its idle runners are counted once
 	} else {
 		for _, r := range s.Repos {
-			s.wg.Go(func() { s.watch(ctx, []string{r}) })
+			ch := make(chan struct{}, 1)
+			s.wake[r] = ch
+			loops = append(loops, loop{[]string{r}, ch})
 		}
+	}
+	s.runCtx = ctx
+	s.mu.Unlock()
+	for _, l := range loops {
+		s.wg.Go(func() { s.watch(ctx, l.repos, l.wake) })
 	}
 	s.requestTopUp(ctx)
 	<-ctx.Done()
+	s.mu.Lock()
+	s.runCtx = nil // deliveries from now on are told the service has stopped
+	s.mu.Unlock()
 	s.wg.Wait()
 	s.P.Wait()
 	return nil
 }
 
 // watch serves repos, which share one pool of runners.
-func (s *Service) watch(ctx context.Context, repos []string) {
+//
+// The repositories are listed for waiting jobs every Poll, or, when webhooks
+// are delivered, every SafetyPoll (they tell what happened at once, the listing
+// is there for a delivery that never came) and whenever one of them asks for it
+// through wake. The local state (runners to start ahead of a job, runners to let
+// go) is looked at every second or Poll in any case: it costs no request.
+func (s *Service) watch(ctx context.Context, repos []string, wake <-chan struct{}) {
 	pool := s.poolOf(repos[0])
 	poll := s.Poll
 	if poll <= 0 {
 		poll = time.Second
 	}
-	s.logf("watching %s for jobs labelled %s* (runners of %s; keeping %d waiting)", strings.Join(repos, ", "), s.prefix(), pool, s.Idle)
-	tick := time.NewTicker(poll)
+	scanEvery, tickEvery := poll, poll
+	if s.Webhooks {
+		scanEvery = s.SafetyPoll
+		if scanEvery <= 0 {
+			scanEvery = 30 * time.Second
+		}
+		tickEvery = min(poll, time.Second)
+	}
+	how := fmt.Sprintf("listing every %v", scanEvery)
+	if s.Webhooks {
+		how = fmt.Sprintf("webhooks, and a listing every %v", scanEvery)
+	}
+	s.logf("watching %s for jobs labelled %s* (%s; runners of %s; keeping %d waiting)", strings.Join(repos, ", "), s.prefix(), how, pool, s.Idle)
+	tick := time.NewTicker(tickEvery)
 	defer tick.Stop()
-	var lastSchedules time.Time
+	var lastSchedules, lastScan time.Time
+	woken := false
 	for {
 		if time.Since(lastSchedules) > 10*time.Minute {
 			lastSchedules = time.Now()
@@ -187,16 +237,21 @@ func (s *Service) watch(ctx context.Context, repos []string) {
 				s.refreshSchedules(ctx, repo)
 			}
 		}
-		free := s.idleCount(pool)
-		for _, repo := range repos {
-			s.scan(ctx, repo, &free)
+		if woken || time.Since(lastScan) >= scanEvery {
+			lastScan = time.Now()
+			for _, repo := range repos {
+				s.scan(ctx, repo)
+			}
 		}
+		woken = false
 		s.prestart(ctx, pool)
 		s.keepIdle(ctx, pool)
 		select {
 		case <-ctx.Done():
 			return
 		case <-tick.C:
+		case <-wake:
+			woken = true
 		}
 	}
 }
@@ -206,6 +261,24 @@ func (s *Service) watch(ctx context.Context, repos []string) {
 func (s *Service) idleCount(repo string) int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.idleCountLocked(repo)
+}
+
+// freeLocked is how many waiting runners of pool no job is promised to: the
+// ones that are idle or being started, less the jobs they are expected to take
+// (a promise lasts 20 s, after which the job is given a runner of its own).
+// The caller holds s.mu.
+func (s *Service) freeLocked(pool string) int {
+	n := s.idleCountLocked(pool)
+	for _, sv := range s.served {
+		if sv.waiting && sv.pool == pool && time.Since(sv.at) < 20*time.Second {
+			n--
+		}
+	}
+	return n
+}
+
+func (s *Service) idleCountLocked(repo string) int {
 	n := s.launching[repo]
 	for l := range s.live {
 		if l.repo == repo && !l.busy {
@@ -253,10 +326,7 @@ func (s *Service) keepIdle(ctx context.Context, repo string) {
 
 // scan starts a runner for every waiting job of ours that no waiting runner is
 // expected to take.
-//
-// free is how many waiting runners have no job yet; it is shared by the
-// repositories of one pool, whose runners can take a job of any of them.
-func (s *Service) scan(ctx context.Context, repo string, free *int) {
+func (s *Service) scan(ctx context.Context, repo string) {
 	runs, err := s.GH.ActiveRuns(ctx, repo)
 	if err != nil {
 		if ctx.Err() == nil {
@@ -275,40 +345,54 @@ func (s *Service) scan(ctx context.Context, repo string, free *int) {
 		s.observeRun(ctx, repo, run, jobs)
 		s.noteArrival(repo, run, jobs)
 		for _, j := range jobs {
-			if j.Status != "queued" || !j.HasLabelPrefix(s.prefix()) {
-				continue
-			}
-			s.mu.Lock()
-			sv := s.served[j.ID]
-			switch {
-			case sv != nil && !sv.waiting:
-				s.mu.Unlock() // a runner was started for it
-				continue
-			case sv != nil && time.Since(sv.at) < 20*time.Second:
-				s.mu.Unlock() // a waiting runner should take it any moment
-				continue
-			case sv == nil && *free > 0:
-				*free-- // an idle runner will take it
-				s.served[j.ID] = &serving{at: time.Now(), waiting: true}
-				s.mu.Unlock()
-				continue
-			}
-			// Not taken: start a runner for it.
-			attempts := 0
-			if sv != nil {
-				attempts = sv.attempts
-			}
-			if attempts >= 3 {
-				s.mu.Unlock()
-				continue
-			}
-			s.served[j.ID] = &serving{attempts: attempts, at: time.Now()}
-			s.mu.Unlock()
-			job := j
-			job.Repo = repo
-			s.startFor(ctx, s.poolOf(repo), &job, attempts+1, time.Now(), time.Time{})
+			j.Repo = repo
+			s.consider(ctx, j)
 		}
 	}
+}
+
+// consider decides what a job needs: nothing when a runner is on it or a
+// waiting runner is about to take it, else a runner of its own. It is called
+// for the jobs a scan lists and for those a webhook delivers, and may run
+// more than once for one job.
+func (s *Service) consider(ctx context.Context, j Job) {
+	if !j.HasLabelPrefix(s.prefix()) {
+		return
+	}
+	pool := s.poolOf(j.Repo)
+	s.mu.Lock()
+	sv := s.served[j.ID]
+	if j.Status != "queued" {
+		if sv != nil && sv.waiting {
+			delete(s.served, j.ID) // a waiting runner took it: it is busy now, and no longer promised
+		}
+		s.mu.Unlock()
+		return
+	}
+	switch {
+	case sv != nil && !sv.waiting && !sv.at.IsZero():
+		s.mu.Unlock() // a runner was started for it
+		return
+	case sv != nil && sv.waiting && time.Since(sv.at) < 20*time.Second:
+		s.mu.Unlock() // a waiting runner should take it any moment
+		return
+	case sv == nil && s.freeLocked(pool) > 0:
+		s.served[j.ID] = &serving{at: time.Now(), waiting: true, pool: pool} // an idle runner will take it
+		s.mu.Unlock()
+		return
+	}
+	// Not taken: start a runner for it.
+	attempts := 0
+	if sv != nil {
+		attempts = sv.attempts
+	}
+	if attempts >= 3 {
+		s.mu.Unlock()
+		return
+	}
+	s.served[j.ID] = &serving{attempts: attempts, at: time.Now(), pool: pool}
+	s.mu.Unlock()
+	s.startFor(ctx, pool, &j, attempts+1, time.Now(), time.Time{})
 }
 
 // noteArrival tells the keep-alive policy that a run asked for our runners: once

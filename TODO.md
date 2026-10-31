@@ -164,7 +164,7 @@ Node.js、Go、Python、Java、Rust、apt 包已经通了（见"已完成"和下
 - ✅ 已知到达提前启动（`prestart.go`、`cron.go`）：`schedule:` 的 cron 到点前 8 秒起 runner（保留到之后 10 分钟，GitHub 的定时 run 常晚几分钟）；`needs` 某个正在跑的 job 的下游 job，按上游最近几次时长的中位数在它结束前起 runner（没有历史就不猜）。真机：链式 a→b→c 第二次运行，b、c 排队到开始 2 s（第一次冷启动 a 16 s、因保活 b、c 也是 2 s）
 - ✅ 被别的等待 runner 抢走 job 的 runner 约 10 秒后释放（以前要白等 3 分钟的 `IdleTimeout`）。实测中发现并修复；真机上这个修复本身还没重跑过，只有单测
 - ✅ 组织级共享池（`-org`）：runner 登记在组织的 `Default` 组（私有仓库可用），一个仓库的突发留下的等待 runner 其他仓库也能用。真机：`bench-lint-docs` 的 job 之后，`bench-go-integration` 的 job 排队后 2 s 开始，用的是保留下来的 runner。只写 `-org` 不写 `-repo` 时监控组织里没归档的全部仓库
-- ⬜ **webhook 取代轮询**：需要 `admin:repo_hook`（仓库）或 `admin:org_hook`（组织）。现在一个池内顺序轮询各仓库，仓库多了一轮会很慢
+- 🟡 **webhook 取代轮询**（2026-10-31，`webhook.go`）：`serve -webhook-listen ADDR -webhook-url https://…`，给每个监控的仓库建/更新一个 `workflow_job` hook（`admin:repo_hook`，退出时删除），HMAC-SHA256 验签（错误签名一律 401，不读内容），队列中的 job 直接进和扫描同一个判断函数（重复投递、扫描同时发现都不会起两台），其余事件唤醒扫描；有 webhook 时每 30 秒（`-safety-poll`）才列一次仓库。顺带修了：启动失败的 job 以前不会重试。单测覆盖（签名、不轮询也能起机器、重投、非监控仓库、hook 注册与删除）。**真机已验证（2026-10-31）**：用户用 `instabox-port` 发布 18091 端口（我自己发布被权限拦下，没有绕开），GitHub 的 ping 回 204，未签名的 POST 经公网地址回 401，`bench-lint-docs` 的 a→b→c 推了两次：job 的 runner 在投递到达后 1.4 s 起好，冷启动的第一个 job 排队到开始 7 s（轮询时 10–16 s），后续 job 1–2 s；`serve` 结束后 hook、runner、机器都已清掉。没测：GitHub 投递失败时靠 30 秒兜底列表找回 job 的路径（只有单测）。组织级 hook 需要 `admin:org_hook`，现在是每个仓库一个。端口 18091 还发布着，由用户决定何时撤下
 - ⬜ 公开仓库和互不信任的仓库不能共用一个池（组织级 runner 能接组内任何仓库带这些标签的 job）；还没有按信任分池
 - ⬜ 标签选机器规格：现在不管标签是什么都起 `ci` 模板默认规格（4 vCPU / 8 GiB），`raccoon-2vcpu`、`raccoon-8vcpu` 之类还不会换规格
 - ⬜ InstaBox 30 分钟自动挂起会不会把"有 runner 在监听的机器"当成空闲，没测
