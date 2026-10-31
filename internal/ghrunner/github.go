@@ -265,6 +265,11 @@ func (c *Client) DeleteRunner(ctx context.Context, repo string, id int64) error 
 	return err
 }
 
+// CancelRun asks GitHub to cancel a workflow run.
+func (c *Client) CancelRun(ctx context.Context, repo string, run int64) error {
+	return c.do(ctx, "POST", fmt.Sprintf("/repos/%s/actions/runs/%d/cancel", repo, run), nil, nil)
+}
+
 // OrgRepos lists the full names of an organization's repositories that are not
 // archived (the first 100).
 func (c *Client) OrgRepos(ctx context.Context, org string) ([]string, error) {

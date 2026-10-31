@@ -81,6 +81,7 @@ type Service struct {
 	recorded  map[int64]bool           // jobs whose duration is in Durations
 	arrived   map[int64]bool           // runs counted as an arrival
 	wake      map[string]chan struct{} // repo -> the loop that watches it
+	sizes     []instabox.Size          // what the organization may create; read on first use
 	runCtx    context.Context          // set while Run runs; webhook deliveries start work under it
 	sem       chan struct{}
 	wg        sync.WaitGroup
@@ -376,7 +377,7 @@ func (s *Service) consider(ctx context.Context, j Job) {
 	case sv != nil && sv.waiting && time.Since(sv.at) < 20*time.Second:
 		s.mu.Unlock() // a waiting runner should take it any moment
 		return
-	case sv == nil && s.freeLocked(pool) > 0:
+	case sv == nil && s.waitingCanServe(j.Labels) && s.freeLocked(pool) > 0:
 		s.served[j.ID] = &serving{at: time.Now(), waiting: true, pool: pool} // an idle runner will take it
 		s.mu.Unlock()
 		return
@@ -449,6 +450,19 @@ func (s *Service) startFor(ctx context.Context, repo string, job *Job, attempt i
 			what = fmt.Sprintf("job %d (%s)", job.ID, job.Name)
 		}
 		if err != nil {
+			var sizeErr *SizeError
+			if errors.As(err, &sizeErr) && job != nil {
+				// No machine can ever serve it: say so and cancel its run, rather than
+				// leave it queued for ever.
+				s.logf("%s %s: %v; cancelling run %d", repo, what, err, job.RunID)
+				s.mu.Lock()
+				s.served[job.ID] = &serving{attempts: 3, at: time.Now()}
+				s.mu.Unlock()
+				if cerr := s.GH.CancelRun(context.WithoutCancel(ctx), cmp.Or(job.Repo, repo), job.RunID); cerr != nil {
+					s.logf("%s %s: cancelling the run: %v", repo, what, cerr)
+				}
+				return
+			}
 			s.logf("%s %s: %v (attempt %d)", repo, what, err, attempt)
 			if job != nil {
 				s.mu.Lock()
@@ -500,7 +514,22 @@ func (s *Service) launch(ctx context.Context, repo string, job *Job, attempt int
 		jit, err := s.GH.GenerateJIT(ctx, repo, "rc-"+tag, labels)
 		jitCh <- jitResult{jit, err}
 	}()
-	id, use, err := s.P.Acquire(ctx, "rc-gh-"+tag)
+	var size instabox.Size
+	var sizeErr error
+	if job != nil {
+		size, sizeErr = s.machineSize(ctx, job.Labels)
+	} else {
+		// A runner kept waiting is of the size its label names.
+		size, sizeErr = s.machineSize(ctx, []string{s.runnerLabel()})
+	}
+	var id string
+	var use *instabox.Usage
+	var err error
+	if sizeErr == nil {
+		id, use, err = s.P.AcquireSize(ctx, "rc-gh-"+tag, size)
+	} else {
+		err = sizeErr
+	}
 	jr := <-jitCh
 	undo := func() {
 		if id != "" {
@@ -514,6 +543,9 @@ func (s *Service) launch(ctx context.Context, repo string, job *Job, attempt int
 	switch {
 	case err != nil:
 		undo()
+		if sizeErr != nil {
+			return nil, tl, sizeErr
+		}
 		return nil, tl, fmt.Errorf("getting a machine: %w", err)
 	case jr.err != nil:
 		undo()

@@ -123,7 +123,7 @@ func (s *Service) refreshSchedules(ctx context.Context, repo string) {
 		}
 		first := 0 // jobs that start the workflow
 		for _, j := range w.Jobs {
-			if len(j.Needs) == 0 && s.isOurs(j) {
+			if len(j.Needs) == 0 && s.isOurs(j) && s.waitingCanServe(labelsOf(j.RunsOn)) {
 				first++
 			}
 		}
@@ -181,7 +181,7 @@ func (s *Service) observeRun(ctx context.Context, repo string, run Run, jobs []J
 		return
 	}
 	for _, d := range w.Jobs {
-		if len(d.Needs) == 0 || !s.isOurs(d) {
+		if len(d.Needs) == 0 || !s.isOurs(d) || !s.waitingCanServe(labelsOf(d.RunsOn)) {
 			continue
 		}
 		listed := false

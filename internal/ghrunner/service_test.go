@@ -21,12 +21,13 @@ import (
 // taken as soon as a runner with its label has been registered and has been
 // asked about twice (the first answer says busy).
 type fakeGitHub struct {
-	mu      sync.Mutex
-	jobs    []Job
-	runners map[int64]int // runner id -> times asked
-	nextID  int64
-	jitBody []byte
-	deleted []int64
+	mu        sync.Mutex
+	jobs      []Job
+	runners   map[int64]int // runner id -> times asked
+	nextID    int64
+	jitBody   []byte
+	deleted   []int64
+	cancelled []int64 // runs asked to be cancelled
 }
 
 func (f *fakeGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -35,6 +36,11 @@ func (f *fakeGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	p := r.URL.Path
 	switch {
+	case r.Method == "POST" && strings.HasPrefix(p, "/repos/o/r/actions/runs/") && strings.HasSuffix(p, "/cancel"):
+		var id int64
+		fmt.Sscanf(strings.TrimPrefix(p, "/repos/o/r/actions/runs/"), "%d", &id)
+		f.cancelled = append(f.cancelled, id)
+		w.WriteHeader(202)
 	case p == "/repos/o/r/actions/runs":
 		runs := []Run{}
 		if r.URL.Query().Get("status") == "queued" {
@@ -89,6 +95,7 @@ type fakeInstaBox struct {
 	machines map[string]bool
 	files    map[string]string // path -> body
 	execs    []string
+	requests []instabox.CreateRequest // what machines were asked for
 	creates  atomic.Int32
 	deletes  atomic.Int32
 }
@@ -107,9 +114,12 @@ func (f *fakeInstaBox) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		f.creates.Add(1)
+		f.requests = append(f.requests, req)
 		f.machines["m_1"] = true
 		w.WriteHeader(202)
 		io.WriteString(w, `{"id":"op_1","machineId":"m_1","state":"queued"}`)
+	case r.Method == "GET" && r.URL.Path == "/v1/orgs":
+		io.WriteString(w, `{"orgs":[{"allowedSpecs":[{"vcpus":4,"memMiB":8192},{"vcpus":2,"memMiB":4096},{"vcpus":8,"memMiB":16384}]}]}`)
 	case strings.HasPrefix(r.URL.Path, "/v1/operations/"):
 		io.WriteString(w, `{"id":"op","machineId":"m_1","state":"succeeded","machine":{"spec":{"vcpus":4,"memMiB":8192,"persistentDiskGiB":20,"rootDiskGiB":50}}}`)
 	case r.Method == "PUT" && r.URL.Path == "/v1/machines/m_1/files":

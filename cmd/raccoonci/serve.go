@@ -29,6 +29,7 @@ func serve(args []string) error {
 	org := fs.String("org", "", "register the runners with this organization instead of with a repository each, so one pool of waiting runners serves all the repositories watched (all of the organization's when no -repo is given); needs a token that may manage the organization's runners")
 	prefix := fs.String("label-prefix", "raccoon-", "serve the jobs whose runs-on has a label starting with this")
 	poll := fs.Duration("poll", time.Second, "how often each repository is asked for waiting jobs")
+	runnerLabel := fs.String("runner-label", "", "the label, and so the size (raccoon-2vcpu is 2 vCPUs), of the runners kept waiting for jobs; only jobs with this label (and no other but self-hosted) are taken by them, other sizes get a machine each. Default: <label-prefix>4vcpu")
 	template := fs.String("template", "ci", "the InstaBox template machines are made from: Ubuntu with GitHub's Actions runner")
 	warm := fs.Int("warm", 0, "keep this many machines paused and ready: a job then starts on a machine that resumes in under a second instead of one that is created")
 	idle := fs.Int("idle", 0, "always keep at least this many runners waiting per repository (a waiting runner is a running machine, about $1 a day); usually 0, and -second-value decides")
@@ -101,6 +102,7 @@ func serve(args []string) error {
 		Repos:       repos,
 		Org:         *org,
 		LabelPrefix: *prefix,
+		RunnerLabel: *runnerLabel,
 		Idle:        *idle,
 		Poll:        *poll,
 		MaxJobs:     *maxJobs,
