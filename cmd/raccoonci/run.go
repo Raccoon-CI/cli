@@ -69,6 +69,7 @@ func runWorkflow(args []string, cat *catalog.Catalog, remote *remoteFlags) (ok b
 	usageFile := fs.String("usage-file", "", "with -on: write what each machine used (when it was requested, ready and deleted, its size) to this file, one JSON object per line; money is worked out from it, not stored")
 	var s3f cacheS3Flags
 	s3f.register(fs)
+	warm := fs.Int("warm", 0, "with -on: keep this many machines paused and ready between runs; a run resumes one (under a second) instead of creating one (6 to 20 seconds), and tops them up when it ends. A paused machine costs its disks only")
 	noPack := fs.Bool("no-pack", false, "with -on: give every job instance a machine of its own, even those that took only seconds in earlier runs")
 	packSlots := fs.Int("pack-slots", 0, "with -on: how many short job instances share a machine at once (default: its number of vCPUs; 1 runs them one after another)")
 	envSnapshots := fs.Int("env-snapshots", 0, "with -on: keep up to this many environment snapshots per repository: after a successful run, a machine whose job installed dependencies (all lockfiles pinned) is saved, and later runs with the same lockfiles start from it; 0 turns it off")
@@ -237,6 +238,9 @@ func runWorkflow(args []string, cat *catalog.Catalog, remote *remoteFlags) (ok b
 		rr.workflow, rr.github, rr.vars, rr.inputs = filepath.ToSlash(rel), github, varObj, inputObj
 		rr.secrets, rr.install, rr.event = secretValues, *install, printer.Event
 		defer rr.provider.Wait() // snapshots being saved and machines being deleted
+		if *warm > 0 {
+			rr.provider.Spares = &instabox.Spares{P: rr.provider, Want: *warm}
+		}
 		if !*noPack {
 			histDir := filepath.Join(cache, "sched")
 			hist, err := sched.OpenHistory(filepath.Join(histDir, repoDirName(repository.(string))+".json"))
@@ -318,6 +322,13 @@ func runWorkflow(args []string, cat *catalog.Catalog, remote *remoteFlags) (ok b
 			rr.pool.Close()
 		}
 		rr.provider.Wait() // snapshots being saved and machines being deleted
+		if rr.provider.Spares != nil && ctx.Err() == nil {
+			// Housekeeping after the answer: have paused machines ready for the next run.
+			if terr := rr.provider.Spares.TopUp(ctx); terr != nil {
+				fmt.Fprintf(os.Stderr, "raccoonci: paused spare machines: %v\n", terr)
+			}
+			rr.provider.Wait()
+		}
 		reportUsage(rr.provider.Usage(), *usageFile)
 	}
 	if err != nil {
