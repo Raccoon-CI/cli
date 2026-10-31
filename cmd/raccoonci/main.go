@@ -37,6 +37,8 @@ commands:
   match [flags] <workflow.yml>       say whether an event (push to a branch, a pull request,
                                      changed files...) triggers the workflow's on:
                                      (exit status 1 if not)
+  serve -repo owner/name [flags]     run the GitHub Actions jobs that ask for a raccoon-* label
+                                     on a fresh InstaBox machine each (GitHub still orchestrates)
   affected [flags] <workflow.yml>    say which jobs the changed files concern, and why
                                      (run -affected leaves out the others)
   run [flags] <workflow.yml>         run a workflow on this machine (raccoonci run -h for flags)
@@ -104,6 +106,8 @@ func main() {
 		if err == nil && !ok {
 			os.Exit(1)
 		}
+	case len(args) >= 1 && args[0] == "serve":
+		err = serve(args[1:])
 	case len(args) >= 1 && args[0] == "affected":
 		err = affectedJobs(os.Stdout, args[1:])
 	case len(args) >= 1 && args[0] == "match":
