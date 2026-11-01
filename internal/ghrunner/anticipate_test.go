@@ -162,7 +162,12 @@ func recordBuildSteps(s *Service, work time.Duration) {
 
 func runWithSteps(t *testing.T, steps []Step, started time.Time, jobMedian time.Duration, work time.Duration, wait time.Duration) (machines int32, log string) {
 	t.Helper()
-	gh := &runInProgress{runners: map[int64]bool{}, started: started, workflow: chainWorkflow, steps: steps}
+	return runChain(t, chainWorkflow, steps, started, jobMedian, work, wait)
+}
+
+func runChain(t *testing.T, wf string, steps []Step, started time.Time, jobMedian time.Duration, work time.Duration, wait time.Duration) (machines int32, log string) {
+	t.Helper()
+	gh := &runInProgress{runners: map[int64]bool{}, started: started, workflow: wf, steps: steps}
 	ghSrv := httptest.NewServer(gh)
 	defer ghSrv.Close()
 	ib := &fakeInstaBox{machines: map[string]bool{}, files: map[string]string{}}
@@ -195,6 +200,74 @@ func TestRunnerStartsWhenTheUpstreamJobIsInItsLastStep(t *testing.T) {
 	n, log := runWithSteps(t, steps, now.Add(-3*time.Second), 100*time.Second, 2*time.Second, 5*time.Second)
 	if n != 1 || !strings.Contains(log, "ahead of time (needs of deploy") {
 		t.Errorf("%d machines, log:\n%s\nwant one, started because the upstream job is in its last step", n, log)
+	}
+}
+
+// Two runners are waiting and four jobs come: the first two are left to the
+// waiting runners and each of the others gets a runner of its own at once. A
+// runner being started for a job is not free for another, so the fourth job is
+// not promised to the one started for the third and left to wait for the
+// promise to run out (20 s), which is what happened.
+func TestEveryJobWithoutAWaitingRunnerGetsOneAtOnce(t *testing.T) {
+	var jobs []Job
+	for i := range 4 {
+		jobs = append(jobs, Job{ID: int64(51 + i), RunID: 7, Name: fmt.Sprintf("test (%d)", i+1), Status: "queued", Labels: []string{"raccoon-4vcpu"}, CreatedAt: time.Now()})
+	}
+	gh := &fakeGitHub{runners: map[int64]int{}} // the jobs come after the runners are up
+	ghSrv := httptest.NewServer(gh)
+	defer ghSrv.Close()
+	ib := &fakeInstaBox{machines: map[string]bool{}, files: map[string]string{}}
+	ibSrv := httptest.NewServer(ib)
+	defer ibSrv.Close()
+	s := newService(t, ghSrv.URL, ib, ibSrv.URL)
+	s.Idle = 2
+	time.AfterFunc(500*time.Millisecond, func() {
+		gh.mu.Lock()
+		gh.jobs = jobs
+		gh.mu.Unlock()
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 2500*time.Millisecond)
+	defer cancel()
+	s.Run(ctx)
+	ib.mu.Lock()
+	defer ib.mu.Unlock()
+	forJobs := 0
+	for _, r := range ib.requests {
+		if strings.HasPrefix(r.Name, "rc-gh-") && !strings.HasPrefix(r.Name, "rc-gh-idle") {
+			forJobs++
+		}
+	}
+	if forJobs != 2 {
+		t.Errorf("%d runners started for jobs within 2.5 s, want 2 (the other two jobs are for the waiting runners)", forJobs)
+	}
+}
+
+// A job with a matrix of three wants three runners: all are started together,
+// not one.
+func TestRunnersForAMatrixAreStartedTogether(t *testing.T) {
+	now := time.Now()
+	steps := []Step{
+		{Number: 1, Name: "Set up job", Status: "completed", Conclusion: "success", StartedAt: now.Add(-3 * time.Second), CompletedAt: now.Add(-2 * time.Second)},
+		{Number: 2, Name: "work", Status: "completed", Conclusion: "success", StartedAt: now.Add(-2 * time.Second), CompletedAt: now.Add(-time.Second)},
+		{Number: 3, Name: "Complete job", Status: "queued"},
+	}
+	wf := `
+on: push
+jobs:
+  build:
+    runs-on: raccoon-4vcpu
+    steps: [{run: 'true'}]
+  test:
+    needs: build
+    runs-on: raccoon-4vcpu
+    strategy:
+      matrix:
+        n: [1, 2, 3]
+    steps: [{run: 'true'}]
+`
+	n, log := runChain(t, wf, steps, now.Add(-3*time.Second), 100*time.Second, 2*time.Second, 5*time.Second)
+	if n != 3 {
+		t.Errorf("%d machines, want 3 for the three jobs of the matrix; log:\n%s", n, log)
 	}
 }
 

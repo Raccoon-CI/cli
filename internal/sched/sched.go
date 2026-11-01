@@ -54,6 +54,18 @@ func OpenHistory(path string) (*History, error) {
 // the matrix values in it).
 func Key(workflow, instance string) string { return workflow + "\x00" + instance }
 
+// Max is the largest of the remembered values of key: what to plan for when
+// being short costs far more than having too much.
+func (h *History) Max(key string) (time.Duration, bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	s := h.d[key]
+	if len(s) == 0 {
+		return 0, false
+	}
+	return time.Duration(slices.Max(s) * float64(time.Second)), true
+}
+
 // Estimate is the median of the remembered durations of key.
 func (h *History) Estimate(key string) (time.Duration, bool) {
 	h.mu.Lock()

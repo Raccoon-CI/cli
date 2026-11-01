@@ -85,7 +85,7 @@ func (s *Service) addExpectation(e *expectation) {
 	for _, x := range s.expected {
 		if x.key == e.key {
 			if !x.started { // seen again, and the moment may have moved
-				x.at, x.until, x.byJob = e.at, e.until, e.byJob
+				x.at, x.until, x.byJob, x.count = e.at, e.until, e.byJob, e.count
 			}
 			return
 		}
@@ -202,6 +202,7 @@ func (s *Service) observeRun(ctx context.Context, repo string, run Run, jobs []J
 		for _, j := range jobs {
 			listed = listed || matches(j.Name, d)
 		}
+		s.recordCount(repo, run.ID, d, jobs)
 		if listed {
 			continue // already queued or running: the scan has it
 		}
@@ -257,7 +258,7 @@ func (s *Service) observeRun(ctx context.Context, repo string, run Run, jobs []J
 		}
 		s.addExpectation(&expectation{
 			key:  fmt.Sprintf("%s|run|%s|%d", repo, displayName(d), run.ID),
-			repo: repo, at: ready, count: 1, why: "needs of " + displayName(d),
+			repo: repo, at: ready, count: s.instancesOf(repo, d), why: "needs of " + displayName(d),
 			until: ready.Add(90 * time.Second),
 			runID: run.ID, job: displayName(d), byJob: readyJob,
 		})

@@ -37,6 +37,7 @@ func serve(args []string) error {
 	hookListen := fs.String("webhook-listen", "", "address to receive GitHub's workflow_job webhooks on (for example 127.0.0.1:18091); the user publishes it, e.g. with instabox-port, and gives that address as -webhook-url. Each watched repository then gets a webhook pointing there (needs the admin:repo_hook scope), removed again when serve stops, and the repositories are listed only every -safety-poll instead of every -poll")
 	hookURL := fs.String("webhook-url", "", "the public https URL that reaches -webhook-listen")
 	safety := fs.Duration("safety-poll", 30*time.Second, "with webhooks: how often the repositories are listed anyway, for a delivery that never came")
+	startsPerMinute := fs.Int("starts-per-minute", 10, "how many machines InstaBox lets the organization start a minute (10 on the Pro plan; beyond it a start is refused). Starts are counted so that the limit is not run into, and the last ones are kept for jobs that are queued, not for runners started ahead of them; 0 means no limit")
 	maxJobs := fs.Int("max-jobs", 8, "how many jobs at once")
 	usageFile := fs.String("usage-file", "", "write what each machine used to this file, one JSON object per line, when the service stops")
 	fs.Usage = func() {
@@ -95,18 +96,19 @@ func serve(args []string) error {
 		return err
 	}
 	s := &ghrunner.Service{
-		KeepAlive:   keep,
-		Durations:   durations,
-		GH:          gh,
-		P:           p,
-		Repos:       repos,
-		Org:         *org,
-		LabelPrefix: *prefix,
-		RunnerLabel: *runnerLabel,
-		Idle:        *idle,
-		Poll:        *poll,
-		MaxJobs:     *maxJobs,
-		Logf:        logf,
+		KeepAlive:       keep,
+		Durations:       durations,
+		GH:              gh,
+		P:               p,
+		Repos:           repos,
+		Org:             *org,
+		StartsPerMinute: *startsPerMinute,
+		LabelPrefix:     *prefix,
+		RunnerLabel:     *runnerLabel,
+		Idle:            *idle,
+		Poll:            *poll,
+		MaxJobs:         *maxJobs,
+		Logf:            logf,
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

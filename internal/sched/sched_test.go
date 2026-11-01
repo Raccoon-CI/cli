@@ -24,6 +24,22 @@ func TestEstimateIsTheMedianOfTheLastFive(t *testing.T) {
 	}
 }
 
+func TestMaxIsTheLargestOfTheLastFive(t *testing.T) {
+	h, err := OpenHistory(filepath.Join(t.TempDir(), "h.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := h.Max("a"); ok {
+		t.Fatal("a maximum without history")
+	}
+	for _, s := range []int{100, 1, 2, 3, 50, 4} { // 100 falls out of the last five
+		h.Record("a", time.Duration(s)*time.Second)
+	}
+	if d, _ := h.Max("a"); d != 50*time.Second {
+		t.Errorf("max = %v, want 50s", d)
+	}
+}
+
 func TestHistoryOutlivesTheProcessAndSurvivesADamagedFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "sub", "h.json")
 	h, _ := OpenHistory(path)

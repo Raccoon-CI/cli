@@ -28,6 +28,8 @@ type fakeGitHub struct {
 	jitBody   []byte
 	deleted   []int64
 	cancelled []int64 // runs asked to be cancelled
+
+	stillQueued bool // a job is still queued when its runner has gone
 }
 
 func (f *fakeGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -53,6 +55,9 @@ func (f *fakeGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		for _, j := range f.jobs {
 			if p == fmt.Sprintf("/repos/o/r/actions/jobs/%d", j.ID) {
 				j.Status, j.Conclusion = "completed", "success"
+				if f.stillQueued { // its runner took another job
+					j.Status, j.Conclusion = "queued", ""
+				}
 				j.CreatedAt = time.Unix(100, 0)
 				j.StartedAt, j.CompletedAt = time.Unix(105, 0), time.Unix(130, 0)
 				json.NewEncoder(w).Encode(j)
@@ -96,6 +101,8 @@ type fakeInstaBox struct {
 	files    map[string]string // path -> body
 	execs    []string
 	requests []instabox.CreateRequest // what machines were asked for
+	refuse   atomic.Int32             // creates still to be refused with 429
+	refused  atomic.Int32
 	creates  atomic.Int32
 	deletes  atomic.Int32
 }
@@ -111,6 +118,13 @@ func (f *fakeInstaBox) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if req.TemplateID != "ci" || req.SnapshotID != "" {
 			w.WriteHeader(400)
 			io.WriteString(w, `{"error":{"code":"bad_request","message":"want template ci"}}`)
+			return
+		}
+		if f.refuse.Load() > 0 { // the start limit
+			f.refuse.Add(-1)
+			f.refused.Add(1)
+			w.WriteHeader(429)
+			io.WriteString(w, `{"error":{"code":"rate_limited","message":"sandbox start limit reached: 10 starts in the last minute","retryable":true}}`)
 			return
 		}
 		f.creates.Add(1)

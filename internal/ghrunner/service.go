@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"slices"
 	"strings"
 	"sync"
@@ -61,6 +62,12 @@ type Service struct {
 	// the repositories are listed only every SafetyPoll. Default 30 s.
 	Webhooks   bool
 	SafetyPoll time.Duration
+	// StartsPerMinute is how many machines the InstaBox organization may start a
+	// minute (10 on the Pro plan; a start over the limit is refused with 429, and
+	// a job that was refused would wait for ever without care). Starts are counted
+	// here, and a runner started ahead of a job, not yet wanted, may not use the
+	// last ones: they are for jobs that are queued. 0 means no limit.
+	StartsPerMinute int
 	// MaxJobs caps machines at once. Default 8.
 	MaxJobs int
 	// IdleTimeout is how long a runner started for a job may wait for it before
@@ -72,22 +79,26 @@ type Service struct {
 	// Logf receives one line per event. May be nil.
 	Logf func(format string, args ...any)
 
-	mu        sync.Mutex
-	served    map[int64]*serving // job id -> who is on it
-	live      map[*liveRunner]bool
-	launching map[string]int // repo -> runners being started
-	expected  []*expectation
-	wfCache   map[string]*workflow.Workflow
-	recorded  map[int64]bool           // jobs whose duration is in Durations
-	arrived   map[int64]bool           // runs counted as an arrival
-	wake      map[string]chan struct{} // repo -> the loop that watches it
-	sizes     []instabox.Size          // what the organization may create; read on first use
-	tracked   map[int64]trackedRun     // runs with a job waiting for one that is still running
-	runCtx    context.Context          // set while Run runs; webhook deliveries start work under it
-	sem       chan struct{}
-	wg        sync.WaitGroup
-	topUpMu   sync.Mutex
-	topUpDue  bool
+	mu             sync.Mutex
+	served         map[int64]*serving // job id -> who is on it
+	live           map[*liveRunner]bool
+	launching      map[string]int // repo -> runners being started
+	expected       []*expectation
+	wfCache        map[string]*workflow.Workflow
+	recorded       map[int64]bool           // jobs whose duration is in Durations
+	arrived        map[int64]bool           // runs counted as an arrival
+	wake           map[string]chan struct{} // repo -> the loop that watches it
+	sizes          []instabox.Size          // what the organization may create; read on first use
+	tracked        map[int64]trackedRun     // runs with a job waiting for one that is still running
+	countsRecorded map[string]bool          // run and job whose number of matrix jobs is remembered
+	runCtx         context.Context          // set while Run runs; webhook deliveries start work under it
+	sem            chan struct{}
+	wg             sync.WaitGroup
+	startMu        sync.Mutex
+	starts         []time.Time // machine starts in the last minute
+	holdUntil      time.Time   // InstaBox said no: no starts before then
+	topUpMu        sync.Mutex
+	topUpDue       bool
 }
 
 // serving remembers that a job has been dealt with.
@@ -95,7 +106,9 @@ type serving struct {
 	attempts int
 	at       time.Time
 	waiting  bool // an idle runner is expected to take it
-	pool     string
+	// notBefore: not to be tried again before then (InstaBox's start limit).
+	notBefore time.Time
+	pool      string
 }
 
 // liveRunner is a runner on a machine of ours.
@@ -284,7 +297,7 @@ func (s *Service) freeLocked(pool string) int {
 func (s *Service) idleCountLocked(repo string) int {
 	n := s.launching[repo]
 	for l := range s.live {
-		if l.repo == repo && !l.busy {
+		if l.repo == repo && !l.busy && !l.jobBased { // not one started for a job, which is spoken for
 			n++
 		}
 	}
@@ -385,6 +398,10 @@ func (s *Service) consider(ctx context.Context, j Job) {
 		s.mu.Unlock()
 		return
 	}
+	if sv != nil && time.Now().Before(sv.notBefore) {
+		s.mu.Unlock() // refused for lack of starts a minute: not before it can be tried again
+		return
+	}
 	// Not taken: start a runner for it.
 	attempts := 0
 	if sv != nil {
@@ -427,8 +444,19 @@ func (s *Service) noteArrival(repo string, run Run, jobs []Job) {
 // startFor starts a machine and a runner of pool (a repository, or an
 // organization) in the background: for job if given, else to wait.
 func (s *Service) startFor(ctx context.Context, repo string, job *Job, attempt int, seen time.Time, keepUntil time.Time) {
+	if ok, wait := s.reserveStart(job == nil); !ok {
+		if job != nil { // asked again when a start is free; the attempt does not count
+			s.mu.Lock()
+			s.served[job.ID] = &serving{attempts: attempt - 1, notBefore: time.Now().Add(wait)}
+			s.mu.Unlock()
+			s.logf("%s job %d (%s): InstaBox allows %d machine starts a minute and they are used; waiting %.0f s", cmp.Or(job.Repo, repo), job.ID, job.Name, s.StartsPerMinute, wait.Seconds())
+		}
+		return
+	}
 	s.mu.Lock()
-	s.launching[repo]++
+	if job == nil { // only a runner kept waiting is free for the next job: one started for a job is spoken for
+		s.launching[repo]++
+	}
 	s.mu.Unlock()
 	s.wg.Go(func() {
 		select {
@@ -436,13 +464,17 @@ func (s *Service) startFor(ctx context.Context, repo string, job *Job, attempt i
 			defer func() { <-s.sem }()
 		case <-ctx.Done():
 			s.mu.Lock()
-			s.launching[repo]--
+			if job == nil {
+				s.launching[repo]--
+			}
 			s.mu.Unlock()
 			return
 		}
 		l, tl, err := s.launch(ctx, repo, job, attempt, seen)
 		s.mu.Lock()
-		s.launching[repo]--
+		if job == nil {
+			s.launching[repo]--
+		}
 		if err == nil {
 			l.keepUntil = keepUntil
 			s.live[l] = true
@@ -466,6 +498,21 @@ func (s *Service) startFor(ctx context.Context, repo string, job *Job, attempt i
 				}
 				return
 			}
+			var limit *instabox.Error
+			if errors.As(err, &limit) && limit.Status == http.StatusTooManyRequests {
+				// Not a failure of the job: InstaBox's start limit. Hold all starts for a
+				// while and ask again, without using up an attempt.
+				s.startMu.Lock()
+				s.holdUntil = time.Now().Add(startHold)
+				s.startMu.Unlock()
+				s.logf("%s %s: %v; trying again in %.0f s", repo, what, err, startHold.Seconds())
+				if job != nil {
+					s.mu.Lock()
+					s.served[job.ID] = &serving{attempts: attempt - 1, notBefore: time.Now().Add(startHold)}
+					s.mu.Unlock()
+				}
+				return
+			}
 			s.logf("%s %s: %v (attempt %d)", repo, what, err, attempt)
 			if job != nil {
 				s.mu.Lock()
@@ -482,6 +529,19 @@ func (s *Service) startFor(ctx context.Context, repo string, job *Job, attempt i
 			final, _ := s.GH.GetJob(context.WithoutCancel(ctx), cmp.Or(job.Repo, repo), job.ID)
 			s.logf("%s %s: %s; queued→started %.1fs, ran %.1fs, %s", repo, what, outcome,
 				final.StartedAt.Sub(final.CreatedAt).Seconds(), final.CompletedAt.Sub(final.StartedAt).Seconds(), final.Conclusion)
+			if final.Status == "queued" && ctx.Err() == nil {
+				// A runner takes the oldest job waiting for its labels, not the one it was
+				// started for: this one is still waiting, and has no runner. It is asked
+				// for again; the attempt is not used up if the runner did its work.
+				attempts := attempt
+				if l.busy {
+					attempts--
+				}
+				s.mu.Lock()
+				s.served[job.ID] = &serving{attempts: attempts}
+				s.mu.Unlock()
+				s.logf("%s %s: still waiting; its runner took another job", repo, what)
+			}
 		} else {
 			s.logf("%s %s %s: %s", repo, what, l.name, outcome)
 		}
