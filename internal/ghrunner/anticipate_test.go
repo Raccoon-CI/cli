@@ -1,6 +1,7 @@
 package ghrunner
 
 import (
+	"cmp"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -29,6 +30,11 @@ type runInProgress struct {
 	deleted  []int64
 	workflow string
 	steps    []Step // the steps the running job reports
+
+	event   string   // what started the run (default push)
+	runPath string   // the run's path with its ref (default the file on main)
+	failRef string   // a ref the workflow file cannot be read at
+	reads   []string // the refs the workflow file was read at
 }
 
 func (f *runInProgress) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -44,8 +50,15 @@ func (f *runInProgress) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		json.NewEncoder(w).Encode(map[string]any{"workflow_runs": runs})
 	case p == "/repos/o/r/actions/runs/9":
-		fmt.Fprint(w, `{"id":9,"status":"in_progress","event":"push","path":".github/workflows/ci.yml@refs/heads/main","head_sha":"abc"}`)
+		fmt.Fprintf(w, `{"id":9,"status":"in_progress","event":%q,"path":%q,"head_sha":"abc"}`,
+			cmp.Or(f.event, "push"), cmp.Or(f.runPath, ".github/workflows/ci.yml@refs/heads/main"))
 	case p == "/repos/o/r/contents/.github/workflows/ci.yml":
+		ref := r.URL.Query().Get("ref")
+		f.reads = append(f.reads, ref)
+		if ref != "" && ref == f.failRef {
+			w.WriteHeader(404)
+			return
+		}
 		json.NewEncoder(w).Encode(map[string]any{"encoding": "base64", "content": base64.StdEncoding.EncodeToString([]byte(f.workflow))})
 	case p == "/repos/o/r/actions/runs/9/jobs":
 		json.NewEncoder(w).Encode(map[string]any{"jobs": []Job{
@@ -283,6 +296,71 @@ func TestRunnerWaitsWhenTheUpstreamJobIsInALongStep(t *testing.T) {
 	n, log := runWithSteps(t, steps, now.Add(-9*time.Second), 10*time.Second, time.Minute, 900*time.Millisecond)
 	if n != 0 {
 		t.Errorf("%d machines started too early, log:\n%s", n, log)
+	}
+}
+
+// Which version of the workflow file a run is read from.
+func TestTheWorkflowFileOfARunIsReadAtTheRefGitHubTookItFrom(t *testing.T) {
+	for _, c := range []struct {
+		name, event, path, failRef string
+		want                       []string // the first refs it is read at
+	}{
+		{"a push: the commit", "push", ".github/workflows/ci.yml@refs/heads/main", "", []string{"abc"}},
+		{"a dispatch: the commit", "workflow_dispatch", ".github/workflows/ci.yml@refs/heads/dev", "", []string{"abc"}},
+		{"a pull request: its merge commit, not its head", "pull_request", ".github/workflows/ci.yml@refs/pull/12/merge", "", []string{"refs/pull/12/merge"}},
+		{"pull_request_target: the base branch", "pull_request_target", ".github/workflows/ci.yml@refs/heads/main", "", []string{"refs/heads/main"}},
+		{"workflow_run: the default branch", "workflow_run", ".github/workflows/ci.yml@refs/heads/main", "", []string{"refs/heads/main"}},
+		{"a merge ref that cannot be read: the commit instead", "pull_request", ".github/workflows/ci.yml@refs/pull/12/merge", "refs/pull/12/merge", []string{"refs/pull/12/merge", "abc"}},
+	} {
+		gh := &runInProgress{runners: map[int64]bool{}, started: time.Now(), workflow: chainWorkflow, event: c.event, runPath: c.path, failRef: c.failRef}
+		srv := httptest.NewServer(gh)
+		ib := &fakeInstaBox{machines: map[string]bool{}, files: map[string]string{}}
+		ibSrv := httptest.NewServer(ib)
+		s := newService(t, srv.URL, ib, ibSrv.URL)
+		s.Durations.Record(sched.Key("o/r", "build"), time.Minute)
+		ctx, cancel := context.WithTimeout(context.Background(), 600*time.Millisecond)
+		s.Run(ctx)
+		cancel()
+		srv.Close()
+		ibSrv.Close()
+		gh.mu.Lock()
+		reads := gh.reads
+		gh.mu.Unlock()
+		if len(reads) < len(c.want) {
+			t.Errorf("%s: read at %v, want to start with %v", c.name, reads, c.want)
+			continue
+		}
+		for i, w := range c.want {
+			if reads[i] != w {
+				t.Errorf("%s: read at %v, want to start with %v", c.name, reads, c.want)
+				break
+			}
+		}
+	}
+}
+
+// What was read at a branch is not kept for ever, but a commit is.
+func TestACachedWorkflowFileIsKeptForACommitAndNotForABranch(t *testing.T) {
+	gh := &runInProgress{runners: map[int64]bool{}, started: time.Now(), workflow: chainWorkflow}
+	srv := httptest.NewServer(gh)
+	defer srv.Close()
+	ib := &fakeInstaBox{machines: map[string]bool{}, files: map[string]string{}}
+	ibSrv := httptest.NewServer(ib)
+	defer ibSrv.Close()
+	s := newService(t, srv.URL, ib, ibSrv.URL)
+	ctx := context.Background()
+	sha := "0123456789abcdef0123456789abcdef01234567"
+	for range 3 {
+		s.workflowFile(ctx, "o/r", ".github/workflows/ci.yml", sha)
+	}
+	gh.mu.Lock()
+	n := len(gh.reads)
+	gh.mu.Unlock()
+	if n != 1 {
+		t.Errorf("a commit was read %d times, want once", n)
+	}
+	if !isCommit(sha) || isCommit("main") || isCommit("refs/pull/1/merge") || isCommit("") || isCommit(sha[:39]+"g") {
+		t.Errorf("isCommit is wrong")
 	}
 }
 

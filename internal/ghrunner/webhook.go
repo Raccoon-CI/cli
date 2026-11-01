@@ -70,6 +70,26 @@ func (h *Webhook) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch r.Header.Get("X-GitHub-Event") {
+	case "push":
+		var ev PushEvent
+		if err := json.Unmarshal(body, &ev); err != nil {
+			http.Error(w, "bad payload", http.StatusBadRequest)
+			return
+		}
+		if !h.S.HandlePush(ev) {
+			w.WriteHeader(http.StatusAccepted)
+			return
+		}
+	case "pull_request":
+		var ev PullRequestEvent
+		if err := json.Unmarshal(body, &ev); err != nil {
+			http.Error(w, "bad payload", http.StatusBadRequest)
+			return
+		}
+		if !h.S.HandlePullRequest(ev) {
+			w.WriteHeader(http.StatusAccepted)
+			return
+		}
 	case "workflow_job":
 		var ev jobEvent
 		if err := json.Unmarshal(body, &ev); err != nil {
@@ -152,7 +172,7 @@ type Hook struct {
 
 func hookBody(url, secret string) map[string]any {
 	return map[string]any{
-		"name": "web", "active": true, "events": []string{"workflow_job"},
+		"name": "web", "active": true, "events": []string{"workflow_job", "push", "pull_request"},
 		"config": map[string]any{"url": url, "content_type": "json", "secret": secret, "insecure_ssl": "0"},
 	}
 }

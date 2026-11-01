@@ -118,6 +118,8 @@ type Job struct {
 	CreatedAt   time.Time `json:"created_at"`
 	StartedAt   time.Time `json:"started_at"`
 	CompletedAt time.Time `json:"completed_at"`
+	// HeadSHA is the commit the run is for (the jobs API gives it too).
+	HeadSHA string `json:"head_sha"`
 	// Steps are the steps so far: which are done and which one the job is in.
 	Steps []Step `json:"steps"`
 	// Repo is the repository the job was found in (set by the service).
@@ -275,6 +277,28 @@ func (c *Client) DeleteRunner(ctx context.Context, repo string, id int64) error 
 		return nil
 	}
 	return err
+}
+
+// ChangedFiles lists the files that differ between two commits (for a pull
+// request, from the merge base). It returns nil, meaning unknown, when GitHub
+// cut the list short (it lists 300 files at most).
+func (c *Client) ChangedFiles(ctx context.Context, repo, base, head string) ([]string, error) {
+	var res struct {
+		Files []struct {
+			Filename string `json:"filename"`
+		} `json:"files"`
+	}
+	if err := c.do(ctx, "GET", "/repos/"+repo+"/compare/"+base+"..."+head, nil, &res); err != nil {
+		return nil, err
+	}
+	if len(res.Files) >= 300 {
+		return nil, nil
+	}
+	files := make([]string, 0, len(res.Files))
+	for _, f := range res.Files {
+		files = append(files, f.Filename)
+	}
+	return files, nil
 }
 
 // CancelRun asks GitHub to cancel a workflow run.

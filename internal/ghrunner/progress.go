@@ -80,6 +80,16 @@ func (s *Service) reportPrediction(repo string, j Job) {
 	s.mu.Lock()
 	var hit *expectation
 	for _, x := range s.expected {
+		if x.sha != "" { // made by a push or a pull request: the first job of its run
+			if x.sha == j.HeadSHA && x.started && !x.reported {
+				x.reported = true
+				why, count, received := x.why, x.count, x.received
+				s.mu.Unlock()
+				s.logf("%s: the first job of the run for %s (%s) was queued %.0f s after the event reached us; runners had been started ahead (%d)", repo, why, j.Name, j.CreatedAt.Sub(received).Seconds(), count)
+				return
+			}
+			continue
+		}
 		if x.runID == j.RunID && x.started && !x.reported && (j.Name == x.job || strings.HasPrefix(j.Name, x.job+" (")) {
 			x.reported = true
 			hit = x

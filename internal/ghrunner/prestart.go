@@ -35,6 +35,10 @@ type expectation struct {
 	atStart    time.Time
 	byJobStart time.Time
 	reported   bool
+	// for an expectation made by a push or pull request: the commit, and when
+	// the event reached us.
+	sha      string
+	received time.Time
 }
 
 // labelsOf lists the labels a job's runs-on names, when they are literal.
@@ -93,9 +97,40 @@ func (s *Service) addExpectation(e *expectation) {
 	s.expected = append(s.expected, e)
 }
 
+// isCommit reports whether ref is a full commit id, which never changes.
+func isCommit(ref string) bool {
+	if len(ref) != 40 {
+		return false
+	}
+	for _, c := range ref {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+// workflowOfRun reads the workflow file a run runs. For most events that is the
+// file at the run's commit. A pull request runs the file of its merge commit,
+// and pull_request_target and workflow_run the file of the base or default
+// branch, none of which is the run's head commit: the ref after the `@` in the
+// run's path says which. If that cannot be read the commit is tried, as before.
+func (s *Service) workflowOfRun(ctx context.Context, repo string, info RunInfo) *workflow.Workflow {
+	path, ref, _ := strings.Cut(info.Path, "@")
+	if ref != "" && (strings.HasPrefix(info.Event, "pull_request") || info.Event == "workflow_run" || strings.HasPrefix(ref, "refs/pull/")) {
+		if w := s.workflowFile(ctx, repo, path, ref); w != nil {
+			return w
+		}
+	}
+	return s.workflowFile(ctx, repo, path, info.HeadSHA)
+}
+
 // workflowFile reads and parses a workflow of repo at ref, remembered.
 func (s *Service) workflowFile(ctx context.Context, repo, path, ref string) *workflow.Workflow {
 	key := repo + "\x00" + path + "\x00" + ref
+	if !isCommit(ref) { // a branch or tag moves: what was read is good for a few minutes
+		key += fmt.Sprintf("\x00%d", time.Now().Unix()/300)
+	}
 	s.mu.Lock()
 	if w, ok := s.wfCache[key]; ok {
 		s.mu.Unlock()
@@ -189,8 +224,7 @@ func (s *Service) observeRun(ctx context.Context, repo string, run Run, jobs []J
 	if err != nil || info.Path == "" {
 		return
 	}
-	path, _, _ := strings.Cut(info.Path, "@")
-	w := s.workflowFile(ctx, repo, path, info.HeadSHA)
+	w := s.workflowOfRun(ctx, repo, info)
 	if w == nil {
 		return
 	}
