@@ -283,7 +283,7 @@ func (rr *remoteRun) run(ctx context.Context, inst engine.RemoteInstance) (runne
 	if err != nil {
 		return runner.Result{}, err
 	}
-	reader := &wireReader{name: inst.Name, event: rr.event}
+	reader := &wireReader{Name: inst.Name, Event: rr.event}
 	defer reader.Flush()
 	job := dispatch.Job{
 		Command: "run-instance",

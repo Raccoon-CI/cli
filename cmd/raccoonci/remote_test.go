@@ -34,7 +34,7 @@ func snapRun(t *testing.T, lock string) (*remoteRun, *wireReader) {
 	}
 	rr := &remoteRun{provider: &instabox.Provider{Snapshot: "sn_base"}, snaps: idx, cat: catalog.Default(),
 		repoFS: root.FS(), trusted: true}
-	reader := &wireReader{event: func(runner.Event) {}}
+	reader := &wireReader{Event: func(runner.Event) {}}
 	reader.Write([]byte(`{"result":{"conclusion":"success","outputs":{}}}` + "\n"))
 	return rr, reader
 }
@@ -80,7 +80,7 @@ func TestNoSnapshotFromAnUntrustedOrRiskyRun(t *testing.T) {
 	}
 	// A failed job leaves a half-installed environment.
 	rr, _ := snapRun(t, "a\n")
-	failed := &wireReader{event: func(runner.Event) {}}
+	failed := &wireReader{Event: func(runner.Event) {}}
 	failed.Write([]byte(`{"result":{"conclusion":"failure","outputs":{}}}` + "\n"))
 	key, _ := rr.restore(inst)
 	if got := rr.keep(key, failed); got != "" {

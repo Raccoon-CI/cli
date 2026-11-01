@@ -78,7 +78,7 @@ jobs:
 	defer srv.Close()
 	var mu sync.Mutex
 	var events []runner.Event
-	reader := &wireReader{name: "test (2)", event: func(e runner.Event) { mu.Lock(); events = append(events, e); mu.Unlock() }}
+	reader := &wireReader{Name: "test (2)", Event: func(e runner.Event) { mu.Lock(); events = append(events, e); mu.Unlock() }}
 	run, err := c.Submit(dispatch.Job{
 		Command: "run-instance",
 		Input:   input,
