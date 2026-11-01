@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"raccoonci/internal/instabox"
@@ -94,6 +95,7 @@ type Service struct {
 	runCtx         context.Context          // set while Run runs; webhook deliveries start work under it
 	sem            chan struct{}
 	wg             sync.WaitGroup
+	heldBack       atomic.Int64 // runners kept waiting that the start limit did not allow
 	startMu        sync.Mutex
 	starts         []time.Time // machine starts in the last minute
 	holdUntil      time.Time   // InstaBox said no: no starts before then
@@ -450,6 +452,8 @@ func (s *Service) startFor(ctx context.Context, repo string, job *Job, attempt i
 			s.served[job.ID] = &serving{attempts: attempt - 1, notBefore: time.Now().Add(wait)}
 			s.mu.Unlock()
 			s.logf("%s job %d (%s): InstaBox allows %d machine starts a minute and they are used; waiting %.0f s", cmp.Or(job.Repo, repo), job.ID, job.Name, s.StartsPerMinute, wait.Seconds())
+		} else {
+			s.heldBack.Add(1)
 		}
 		return
 	}

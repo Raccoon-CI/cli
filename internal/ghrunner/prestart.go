@@ -288,8 +288,12 @@ func (s *Service) prestart(ctx context.Context, repo string) {
 	s.mu.Unlock()
 	for _, e := range due {
 		s.logf("%s: starting %d runner(s) ahead of time (%s, expected %s)", repo, e.count, e.why, e.at.Format("15:04:05"))
+		before := s.heldBack.Load()
 		for range e.count {
 			s.startFor(ctx, repo, nil, 1, now, e.until)
+		}
+		if held := s.heldBack.Load() - before; held > 0 {
+			s.logf("%s: %d of those %d runner(s) not started: the start limit keeps the last starts for jobs that are queued", repo, held, e.count)
 		}
 	}
 }
