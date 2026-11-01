@@ -82,6 +82,7 @@ type Service struct {
 	arrived   map[int64]bool           // runs counted as an arrival
 	wake      map[string]chan struct{} // repo -> the loop that watches it
 	sizes     []instabox.Size          // what the organization may create; read on first use
+	tracked   map[int64]trackedRun     // runs with a job waiting for one that is still running
 	runCtx    context.Context          // set while Run runs; webhook deliveries start work under it
 	sem       chan struct{}
 	wg        sync.WaitGroup
@@ -245,6 +246,7 @@ func (s *Service) watch(ctx context.Context, repos []string, wake <-chan struct{
 			}
 		}
 		woken = false
+		s.refreshTracked(ctx, repos)
 		s.prestart(ctx, pool)
 		s.keepIdle(ctx, pool)
 		select {
@@ -361,6 +363,7 @@ func (s *Service) consider(ctx context.Context, j Job) {
 		return
 	}
 	pool := s.poolOf(j.Repo)
+	s.reportPrediction(j.Repo, j) // a job a runner was started ahead for may be taken before a scan sees it queued
 	s.mu.Lock()
 	sv := s.served[j.ID]
 	if j.Status != "queued" {

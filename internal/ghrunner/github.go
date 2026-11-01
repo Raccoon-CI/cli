@@ -118,8 +118,20 @@ type Job struct {
 	CreatedAt   time.Time `json:"created_at"`
 	StartedAt   time.Time `json:"started_at"`
 	CompletedAt time.Time `json:"completed_at"`
+	// Steps are the steps so far: which are done and which one the job is in.
+	Steps []Step `json:"steps"`
 	// Repo is the repository the job was found in (set by the service).
 	Repo string `json:"-"`
+}
+
+// Step is one step of a job, as the jobs API lists it (times are to the second).
+type Step struct {
+	Number      int       `json:"number"`
+	Name        string    `json:"name"`
+	Status      string    `json:"status"` // queued, in_progress, completed
+	Conclusion  string    `json:"conclusion"`
+	StartedAt   time.Time `json:"started_at"`
+	CompletedAt time.Time `json:"completed_at"`
 }
 
 // ActiveRuns lists the runs that are queued or in progress: the ones that can

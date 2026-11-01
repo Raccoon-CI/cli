@@ -176,8 +176,24 @@ Node.js、Go、Python、Java、Rust、apt 包已经通了（见"已完成"和下
 - ⬜ InstaBox 30 分钟自动挂起会不会把"有 runner 在监听的机器"当成空闲，没测
 - ⬜ 真实 `schedule:` 触发没测（cron 计算和提前启动只有单测）
 - ⬜ `actions/cache` 和 artifact 在这条路径上走 GitHub 自己的服务；能否重定向到 `internal/cache` 没试
-- ⬜ 完整对比：给另外 6 个 bench 仓库建 `bench-raccoon` 分支（现在只有 `bench-lint-docs`，加上为共享池测试建的 `bench-go-integration`），用 `raccoonbench` 对 GitHub 托管、`instabox-runner`、`serve` 重复跑；**基准价格文件里 GitHub 单价（$0.008/分钟）是旧的，报花费前要先改**。Blacksmith 和 Jog 因为要企业资质/预充 100 美元，已决定不比
+- ✅ 完整对比（2026-10-31）：7 个 bench 仓库都有了 `bench-raccoon` 分支（`runs-on: raccoon-4vcpu`，和 `bench-github` 只差这一行），3 个有 `bench-raccoon-2c`（`raccoon-2vcpu`）；raccoonbench 新增 `raccoon-serve` 系统（`serve` 随会话启停，花费按 serve 的用量文件算）；价格文件改成 GitHub 当前价（2 核 $0.006/分钟，4 核 $0.012），`instabox-medium` 按 4 vCPU / 8 GiB 的模板估（推断）。第一轮：7 负载 × 4 系统 × 1 次；第二轮：3 负载 × 3 系统 × 3 次；第三轮：2 核对 2 核，3 负载 × 3 次。Blacksmith 和 Jog 因为要企业资质/预充 100 美元，已决定不比。**基准的原则（用户 2026-10-31）：保持客观，不能为了我们的产品改形状；结果不好就改产品**
 - ⬜ 清理：组织里有三个 `Blacksmith runners …` runner 组（之前试用留下的），`bench-frontend-e2e` 里还有分支 `blacksmith-migration-2b5b7fd`；等用户决定后再删
+
+### 3.7b 两种 trigger 下的加速边界，和 Node 家族的专项优化（2026-10-31 讨论，**都还没做**）
+
+**走 Actions trigger 时做不了的加速**（GitHub 决定"跑什么、什么时候跑"，我们只提供机器）：①跳过没受影响的 job 和按内容哈希重放整个 job（runner 只执行 GitHub 发来的步骤，不能改、不能省；取消会让 run 变 cancelled）；②去掉 GitHub 自己的派发延迟（冷启动约 4–5 s：建 run 排队 1–3 s、runner 认证建会话约 2 s、派发约 1 s；有等待 runner 时下限 1–2 s）；③提前精确知道整个任务图（动态矩阵、依赖上游输出的 `if:` 要等运行时；静态部分可以读 workflow 文件得到，下游 job 的时间只能预测）；④控制排队顺序和优先级（`concurrency`、队列是 GitHub 的）；⑤同一个 run 的 job 之间原生共享工作区和服务容器；⑥替换 GitHub 的缓存、artifact、OIDC、job summary 服务（令牌和地址来自 GitHub 的 job 消息，可能能用 runner 的 `.env` 或 job-started 钩子重定向，没试过）；⑦替换 `actions/checkout`。**能做但没做**：同一台机器上多个一次性 runner 打包短 job、环境快照（sticky disk 式）、同一个 run 内复用机器、按规格保活、push/PR 事件到达时提前启动。**只有自己的 trigger 才能做**：跳过没受影响的 job、没有 GitHub 的派发下限、精确的任务图、排队控制。**自己的 trigger 做不了或代价更高**：GitHub 的全部语义（可复用 workflow、`concurrency`、环境和保护规则、OIDC、必需检查、PR 界面）、macOS/Windows/ARM（GitHub runner 装在用户自己的机器上就行）。
+
+**"跑了但实际没跑"（Actions 下跳过没受影响的 job）的两种做法**：①改造普通 runner：把 `bash`/`sh`/`python` 和 runner 自带的 `node` 换成直接退出 0 的小程序，界面上每步显示成功，要靠日志和注解说明；②自己实现 runner 协议的假 runner，把每步报成 Skipped、job 报成功，可以放在控制器上不起虚拟机（约 3 s），但协议没有官方文档（`github-act-runner` 是开源实现，没验证）。判断"该不该跳"用现有的 `internal/affected`，输入是变更文件列表和仓库的包依赖图。**最大风险是假绿**，所以要：默认关闭、按仓库开启；默认分支 push、tag、`schedule`、`workflow_dispatch` 一律全跑，只在 PR 上跳；workflow、本地 action、配置文件变了就全跑；任何不确定一律全跑；有 `outputs`、上传 artifact、`environment`、`container`/`services` 的 job 不跳；提供手动覆盖（PR 标签或 `[ci full]`）；"审计模式"：被判可跳的 job 偶尔真的跑，统计漏判率。**先做的不是实现，而是用真实仓库的历史做离线回放**：最近若干提交里按规则会跳过多少 job，对照这些 job 当时实际是否成功，看漏判率；漏判率不能接近零就不做。只对 monorepo 里常常不受影响的长 job 有用，单 job 仓库（基准负载）没用。
+
+**Node 家族专项（用户 2026-10-31 大致同意）**：Vercel 的按需构建是 **Turborepo**（任务级内容哈希缓存，输入没变就重放输出和日志，`--affected` 只跑受影响的包）；**Turbopack** 是 Next.js 里的增量打包器（进程内函数级缓存），两者思路相同、粒度不同。原则：**让用户自己的工具按内容哈希来跳过，我们负责把缓存放在近处**，正确性由工具保证，不会有我们猜依赖导致的假绿。按把握从大到小：
+- ⬜ **注入 Turborepo / Nx 的远程缓存**：据我所知两者都有公开的 HTTP 接口、可自托管（**没核对细节**）；用我们的对象存储（`internal/blob`）写一个小服务，用 runner 目录里的 `.env` 注入 `TURBO_API`/`TURBO_TOKEN` 等变量，用户不用改 workflow。Actions 和自己的 trigger 两种路径都能用。验证办法：`create-turbo` 生成真实项目，写最小的缓存服务，跑两次 `turbo run build`，看是否命中、重放、省多少。风险最大的一项，因为依赖对接口的记忆
+- ⬜ **把 Node 和包管理器预先放进工具缓存**：数据里 `typescript-monorepo` warm 中 `pnpm/action-setup` 6 s + `setup-node` 7–8 s ≈ 14 s，占 52–67 s 的两成多；`setup-node` 在工具缓存里找到版本就不下载。排队时本来就会读 workflow，用现有的 `scan` 和 `provision` 在 runner 接 job 之前备好版本（窗口约 3–4 s，要预先把包放在机器上）
+- ⬜ **热盘保留框架的构建缓存**：`.next/cache`、`.turbo`、`node_modules/.cache`、tsc 增量信息、eslint 和 jest 缓存；Turbopack 的磁盘缓存位置待确认。属于环境快照（sticky disk）那一类
+- ⬜ **预装重型二进制**：Playwright 浏览器、Cypress、`postinstall` 下载的原生模块；`frontend-e2e` 里 `npx playwright install` 每次都做，占多少还没量
+- ✅ 前后端分离的并行：本来就是不同 job、各自一台机器
+- 先做的两个小验证：①用现有步骤耗时数据算出 Node 类 job 里"装环境"类步骤占多少（第 2、4 项的天花板，几乎不花钱）；②Turborepo 远程缓存的最小实验
+
+**任务图**（读 workflow 源文件，见 3.7 的提前启动）：目前只用在"下游 job 的提前启动"。读到的静态信息还能：一次得到所有 job、`needs`、矩阵个数、`runs-on` 标签；用 `plan` 求值静态的 `if:`，为假的 job 不起机器；在 push/PR 事件到达时一次性提前起所有第一层 job（需要订阅 `push` 事件）；同一个 run 里让下游 job 接着在上一个 job 的机器上跑（热的包管理器 store 和工具缓存，限同一个 run）；轮询上游 job 的步骤进度（`GET jobs/{id}` 带 `steps`）来修正下游启动时间（**已做**，`progress.go`，2026-11-01 真机验证：一个带 5–24 s 随机步骤的 build 加一个 deploy，8 次预测，按步骤的平均绝对误差 5.3 s、只按中位数 5.0 s，但按步骤从未偏晚（误差 −9 到 −2 s），只按中位数有 4/8 偏晚（最晚 +9 s，runner 约 7 s 才能启动，所以是冷启动）；有历史后下游 job 都是 1 s 开始。样本只有 8 次，而且是故意设计出大方差的情形，真实 workflow 差距会小）。**已发现的缺口**：PR 触发的 run 用的是合并提交（`refs/pull/N/merge`）上的 workflow 文件，而 `observeRun` 现在用的是 run 的 `head_sha`，两者不一致时会读错版本；应改用 run 的 `path` 里 `@` 后面的 ref。
 
 ### 3.8 MVP 之后
 

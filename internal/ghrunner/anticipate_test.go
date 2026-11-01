@@ -28,6 +28,7 @@ type runInProgress struct {
 	nextID   int64
 	deleted  []int64
 	workflow string
+	steps    []Step // the steps the running job reports
 }
 
 func (f *runInProgress) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -48,7 +49,7 @@ func (f *runInProgress) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]any{"encoding": "base64", "content": base64.StdEncoding.EncodeToString([]byte(f.workflow))})
 	case p == "/repos/o/r/actions/runs/9/jobs":
 		json.NewEncoder(w).Encode(map[string]any{"jobs": []Job{
-			{ID: 31, RunID: 9, Name: "build", Status: "in_progress", Labels: []string{"raccoon-4vcpu"}, CreatedAt: f.started, StartedAt: f.started},
+			{ID: 31, RunID: 9, Name: "build", Status: "in_progress", Labels: []string{"raccoon-4vcpu"}, CreatedAt: f.started, StartedAt: f.started, Steps: f.steps},
 		}})
 	case p == "/repos/o/r/actions/runners/generate-jitconfig":
 		f.nextID++
@@ -134,6 +135,81 @@ jobs:
 	mu.Unlock()
 	if !strings.Contains(text, "ahead of time (needs of deploy") {
 		t.Errorf("no word of the anticipated job:\n%s", text)
+	}
+}
+
+const chainWorkflow = `
+on: push
+jobs:
+  build:
+    runs-on: raccoon-4vcpu
+    steps: [{run: 'true'}]
+  deploy:
+    needs: build
+    runs-on: raccoon-4vcpu
+    steps: [{run: 'true'}]
+`
+
+// recordBuildSteps remembers a build job of three steps: 1 s, `work` and 1 s.
+func recordBuildSteps(s *Service, work time.Duration) {
+	for i, c := range []struct {
+		name string
+		d    time.Duration
+	}{{"Set up job", time.Second}, {"work", work}, {"Complete job", time.Second}} {
+		s.Durations.Record(stepKey("o/r", "build", Step{Number: i + 1, Name: c.name}), c.d)
+	}
+}
+
+func runWithSteps(t *testing.T, steps []Step, started time.Time, jobMedian time.Duration, work time.Duration, wait time.Duration) (machines int32, log string) {
+	t.Helper()
+	gh := &runInProgress{runners: map[int64]bool{}, started: started, workflow: chainWorkflow, steps: steps}
+	ghSrv := httptest.NewServer(gh)
+	defer ghSrv.Close()
+	ib := &fakeInstaBox{machines: map[string]bool{}, files: map[string]string{}}
+	ibSrv := httptest.NewServer(ib)
+	defer ibSrv.Close()
+	s := newService(t, ghSrv.URL, ib, ibSrv.URL)
+	s.Durations.Record(sched.Key("o/r", "build"), jobMedian)
+	recordBuildSteps(s, work)
+	var mu sync.Mutex
+	var lines []string
+	s.Logf = func(f string, a ...any) { mu.Lock(); lines = append(lines, fmt.Sprintf(f, a...)); mu.Unlock() }
+	ctx, cancel := context.WithTimeout(context.Background(), wait)
+	defer cancel()
+	s.Run(ctx)
+	mu.Lock()
+	defer mu.Unlock()
+	return ib.creates.Load(), strings.Join(lines, "\n")
+}
+
+// The job that is running has done everything but its last step, which takes a
+// second: the runner for the job that needs it is started at once, though the
+// whole job is usually far longer than it has run.
+func TestRunnerStartsWhenTheUpstreamJobIsInItsLastStep(t *testing.T) {
+	now := time.Now()
+	steps := []Step{
+		{Number: 1, Name: "Set up job", Status: "completed", Conclusion: "success", StartedAt: now.Add(-3 * time.Second), CompletedAt: now.Add(-2 * time.Second)},
+		{Number: 2, Name: "work", Status: "completed", Conclusion: "success", StartedAt: now.Add(-2 * time.Second), CompletedAt: now.Add(-time.Second)},
+		{Number: 3, Name: "Complete job", Status: "queued"},
+	}
+	n, log := runWithSteps(t, steps, now.Add(-3*time.Second), 100*time.Second, 2*time.Second, 5*time.Second)
+	if n != 1 || !strings.Contains(log, "ahead of time (needs of deploy") {
+		t.Errorf("%d machines, log:\n%s\nwant one, started because the upstream job is in its last step", n, log)
+	}
+}
+
+// The median says the job is nearly done (10 s, run for 9 s) but it is in a
+// step that usually takes a minute: no runner is started for what follows yet.
+func TestRunnerWaitsWhenTheUpstreamJobIsInALongStep(t *testing.T) {
+	now := time.Now()
+	steps := []Step{
+		{Number: 1, Name: "Set up job", Status: "completed", Conclusion: "success", StartedAt: now.Add(-9 * time.Second), CompletedAt: now.Add(-8 * time.Second)},
+		{Number: 2, Name: "work", Status: "in_progress", StartedAt: now.Add(-8 * time.Second)},
+		{Number: 3, Name: "Complete job", Status: "queued"},
+	}
+	n, log := runWithSteps(t, steps, now.Add(-9*time.Second), 10*time.Second, time.Minute, 900*time.Millisecond)
+	if n != 0 {
+		t.Errorf("%d machines started too early, log:\n%s", n, log)
 	}
 }
 

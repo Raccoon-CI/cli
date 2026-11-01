@@ -25,6 +25,16 @@ type expectation struct {
 	why     string
 	until   time.Time // keep the runner at least until
 	started bool
+
+	// To see how good the predictions are: the job that is waited for, what the
+	// job medians alone said (at is from the steps), what both said when the
+	// runner was started, and whether the outcome has been reported.
+	runID      int64
+	job        string
+	byJob      time.Time
+	atStart    time.Time
+	byJobStart time.Time
+	reported   bool
 }
 
 // labelsOf lists the labels a job's runs-on names, when they are literal.
@@ -74,6 +84,9 @@ func (s *Service) addExpectation(e *expectation) {
 	defer s.mu.Unlock()
 	for _, x := range s.expected {
 		if x.key == e.key {
+			if !x.started { // seen again, and the moment may have moved
+				x.at, x.until, x.byJob = e.at, e.until, e.byJob
+			}
 			return
 		}
 	}
@@ -164,6 +177,7 @@ func (s *Service) observeRun(ctx context.Context, repo string, run Run, jobs []J
 				s.mu.Unlock()
 				if !done && j.Conclusion == "success" {
 					s.Durations.Record(sched.Key(repo, j.Name), j.CompletedAt.Sub(j.StartedAt))
+					s.recordSteps(repo, j)
 				}
 			}
 		}
@@ -191,7 +205,7 @@ func (s *Service) observeRun(ctx context.Context, repo string, run Run, jobs []J
 		if listed {
 			continue // already queued or running: the scan has it
 		}
-		var ready time.Time
+		var ready, readyJob time.Time
 		known := true
 		for _, need := range d.Needs {
 			nj := w.Job(need)
@@ -208,8 +222,11 @@ func (s *Service) observeRun(ctx context.Context, repo string, run Run, jobs []J
 				var at time.Time
 				if j.Status == "completed" {
 					at = j.CompletedAt
+					if at.After(readyJob) {
+						readyJob = at
+					}
 				} else {
-					est, ok := s.Durations.Estimate(sched.Key(repo, j.Name))
+					est, ok := s.estimatedTotal(repo, j, time.Now())
 					if !ok {
 						known = false
 						break
@@ -219,6 +236,9 @@ func (s *Service) observeRun(ctx context.Context, repo string, run Run, jobs []J
 						start = time.Now()
 					}
 					at = start.Add(est)
+					if jm, ok := s.Durations.Estimate(sched.Key(repo, j.Name)); ok && start.Add(jm).After(readyJob) {
+						readyJob = start.Add(jm)
+					}
 				}
 				if at.After(ready) {
 					ready = at
@@ -229,6 +249,9 @@ func (s *Service) observeRun(ctx context.Context, repo string, run Run, jobs []J
 				break
 			}
 		}
+		if known && !ready.IsZero() {
+			s.track(run.ID, repo, ready)
+		}
 		if !known || ready.IsZero() {
 			continue
 		}
@@ -236,6 +259,7 @@ func (s *Service) observeRun(ctx context.Context, repo string, run Run, jobs []J
 			key:  fmt.Sprintf("%s|run|%s|%d", repo, displayName(d), run.ID),
 			repo: repo, at: ready, count: 1, why: "needs of " + displayName(d),
 			until: ready.Add(90 * time.Second),
+			runID: run.ID, job: displayName(d), byJob: readyJob,
 		})
 	}
 }
@@ -255,6 +279,7 @@ func (s *Service) prestart(ctx context.Context, repo string) {
 		keep = append(keep, e)
 		if e.repo == repo && !e.started && now.After(e.at.Add(-lead)) {
 			e.started = true
+			e.atStart, e.byJobStart = e.at, e.byJob
 			due = append(due, e)
 		}
 	}
