@@ -15,14 +15,14 @@ import (
 	"time"
 
 	"github.com/Raccoon-CI/raccoonci/internal/actions"
-	"github.com/Raccoon-CI/raccoonci/internal/catalog"
 	"github.com/Raccoon-CI/raccoonci/internal/envsnap"
 	"github.com/Raccoon-CI/raccoonci/internal/plan"
-	"github.com/Raccoon-CI/raccoonci/internal/platform"
 	"github.com/Raccoon-CI/raccoonci/internal/runnercmd"
 	"github.com/Raccoon-CI/raccoonci/internal/runnerimages"
 	"github.com/Raccoon-CI/raccoonci/internal/scan"
-	"github.com/Raccoon-CI/raccoonci/internal/workflow"
+	"github.com/Raccoon-CI/raccoonci/pkg/catalog"
+	"github.com/Raccoon-CI/raccoonci/pkg/platform"
+	"github.com/Raccoon-CI/raccoonci/pkg/workflow"
 )
 
 // version is set at build time via -ldflags "-X main.version=...".
@@ -52,7 +52,7 @@ commands:
                                      snapshot files (uses GITHUB_TOKEN for the API fallback if set)
 
 The catalog is Raccoon CI's knowledge of toolchains, tools, actions, runner
-labels and images (see internal/catalog/catalog.yaml for the format). It is
+labels and images (see pkg/catalog/catalog.yaml for the format). It is
 built up in layers, each on top of the one before:
   built-in               compiled into this binary
   -catalog-url URL       a feed pulled over https and cached on disk, refreshed

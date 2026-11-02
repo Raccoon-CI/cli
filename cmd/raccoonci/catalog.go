@@ -10,7 +10,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/Raccoon-CI/raccoonci/internal/catalog"
+	"github.com/Raccoon-CI/raccoonci/pkg/catalog"
 )
 
 // catalogFlags say where the catalog comes from, in layers: the built-in

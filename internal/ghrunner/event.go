@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Raccoon-CI/raccoonci/internal/trigger"
+	"github.com/Raccoon-CI/raccoonci/pkg/trigger"
 )
 
 // A push or a pull request is about to start workflows, but GitHub takes a

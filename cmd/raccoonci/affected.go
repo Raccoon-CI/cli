@@ -10,7 +10,7 @@ import (
 	"strings"
 
 	"github.com/Raccoon-CI/raccoonci/internal/affected"
-	"github.com/Raccoon-CI/raccoonci/internal/workflow"
+	"github.com/Raccoon-CI/raccoonci/pkg/workflow"
 )
 
 // affectedJobs implements `raccoonci affected`: which jobs the changes

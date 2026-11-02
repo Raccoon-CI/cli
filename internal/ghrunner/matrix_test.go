@@ -5,7 +5,7 @@ import (
 	"time"
 
 	"github.com/Raccoon-CI/raccoonci/internal/sched"
-	"github.com/Raccoon-CI/raccoonci/internal/workflow"
+	"github.com/Raccoon-CI/raccoonci/pkg/workflow"
 )
 
 func parseJob(t *testing.T, src, id string) *workflow.Job {

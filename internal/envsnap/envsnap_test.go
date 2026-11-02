@@ -10,7 +10,7 @@ import (
 	"testing/fstest"
 	"time"
 
-	"github.com/Raccoon-CI/raccoonci/internal/catalog"
+	"github.com/Raccoon-CI/raccoonci/pkg/catalog"
 )
 
 func writeFile(path, content string) error { return os.WriteFile(path, []byte(content), 0o600) }

@@ -4,7 +4,7 @@ import (
 	"testing"
 
 	"github.com/Raccoon-CI/raccoonci/internal/runnerimages"
-	"github.com/Raccoon-CI/raccoonci/internal/workflow"
+	"github.com/Raccoon-CI/raccoonci/pkg/workflow"
 )
 
 func build(t *testing.T, src string) *Plan {
