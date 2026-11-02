@@ -13,8 +13,8 @@ import (
 	"testing"
 	"time"
 
-	"raccoonci/internal/dispatch"
-	"raccoonci/internal/instabox"
+	"github.com/Raccoon-CI/raccoonci/internal/dispatch"
+	"github.com/Raccoon-CI/raccoonci/internal/instabox"
 )
 
 // fakeGitHub has one repository with a run whose jobs are given; a job is

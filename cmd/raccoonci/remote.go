@@ -18,15 +18,15 @@ import (
 	"sync/atomic"
 	"time"
 
-	"raccoonci/internal/catalog"
-	"raccoonci/internal/dispatch"
-	"raccoonci/internal/engine"
-	"raccoonci/internal/envsnap"
-	"raccoonci/internal/instabox"
-	"raccoonci/internal/runner"
-	"raccoonci/internal/sched"
-	"raccoonci/internal/value"
-	"raccoonci/internal/wire"
+	"github.com/Raccoon-CI/raccoonci/internal/catalog"
+	"github.com/Raccoon-CI/raccoonci/internal/dispatch"
+	"github.com/Raccoon-CI/raccoonci/internal/engine"
+	"github.com/Raccoon-CI/raccoonci/internal/envsnap"
+	"github.com/Raccoon-CI/raccoonci/internal/instabox"
+	"github.com/Raccoon-CI/raccoonci/internal/runner"
+	"github.com/Raccoon-CI/raccoonci/internal/sched"
+	"github.com/Raccoon-CI/raccoonci/internal/value"
+	"github.com/Raccoon-CI/raccoonci/internal/wire"
 )
 
 // remoteFlags are the `run` flags that choose where it runs. They are taken

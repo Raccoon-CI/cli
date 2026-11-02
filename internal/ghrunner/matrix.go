@@ -5,9 +5,9 @@ import (
 	"strings"
 	"time"
 
-	"raccoonci/internal/sched"
-	"raccoonci/internal/value"
-	"raccoonci/internal/workflow"
+	"github.com/Raccoon-CI/raccoonci/internal/sched"
+	"github.com/Raccoon-CI/raccoonci/internal/value"
+	"github.com/Raccoon-CI/raccoonci/internal/workflow"
 )
 
 // A job with a matrix is queued as many jobs as the matrix has combinations, all

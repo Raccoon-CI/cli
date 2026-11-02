@@ -10,7 +10,7 @@ import (
 	"net/http"
 	"time"
 
-	"raccoonci/internal/ghrunner"
+	"github.com/Raccoon-CI/raccoonci/internal/ghrunner"
 )
 
 // startWebhooks listens for GitHub's deliveries on listen and points a webhook

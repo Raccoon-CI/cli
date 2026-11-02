@@ -11,7 +11,7 @@ Raccoon CI is a self-hosted CI/CD platform. Users move their workflows from GitH
 - There are two ways to run a workflow. (1) The own engine (`raccoonci run`): Raccoon CI executes the workflow itself, so it must reimplement the runtime services official actions call (artifact, cache, OIDC, job summary); see `docs/gha-compat.md` for what act and Gitea already do. (2) The GitHub-triggered path (`raccoonci serve`, `internal/ghrunner`): GitHub still triggers and orchestrates the workflow, and a job whose `runs-on` has a `raccoon-*` label runs on an InstaBox machine through GitHub's own runner, which is the shape Blacksmith has. The project began as "own engine only, never a GitHub self-hosted runner orchestrator (the user rejects paying two bills)"; on 2026-10-31 the user, after studying Blacksmith, said that judgment may be wrong and asked for (2) to be built and measured. Which path is the product's main one is not decided: do not remove either, and do not call one of them "the" architecture.
 - Planned: AI agents that triage or fix failed runs.
 
-The code is a Go skeleton (module path `raccoonci`). The Makefile and layout follow the sibling project `../release-manager`.
+The code is a Go skeleton (module path `github.com/Raccoon-CI/raccoonci`). The Makefile and layout follow the sibling project `../release-manager`.
 
 ## Commands
 

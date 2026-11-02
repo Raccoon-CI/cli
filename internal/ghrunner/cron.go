@@ -1,6 +1,6 @@
 package ghrunner
 
-import "raccoonci/internal/cron"
+import "github.com/Raccoon-CI/raccoonci/internal/cron"
 
 // Cron and ParseCron live in internal/cron, which the server shares.
 type Cron = cron.Cron

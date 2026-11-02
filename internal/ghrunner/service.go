@@ -12,9 +12,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"raccoonci/internal/instabox"
-	"raccoonci/internal/sched"
-	"raccoonci/internal/workflow"
+	"github.com/Raccoon-CI/raccoonci/internal/instabox"
+	"github.com/Raccoon-CI/raccoonci/internal/sched"
+	"github.com/Raccoon-CI/raccoonci/internal/workflow"
 )
 
 const (

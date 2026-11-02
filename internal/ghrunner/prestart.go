@@ -6,9 +6,9 @@ import (
 	"strings"
 	"time"
 
-	"raccoonci/internal/sched"
-	"raccoonci/internal/trigger"
-	"raccoonci/internal/workflow"
+	"github.com/Raccoon-CI/raccoonci/internal/sched"
+	"github.com/Raccoon-CI/raccoonci/internal/trigger"
+	"github.com/Raccoon-CI/raccoonci/internal/workflow"
 )
 
 // Some jobs are known to be coming: a scheduled workflow at its cron time, the

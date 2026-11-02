@@ -7,7 +7,7 @@ import (
 	"strconv"
 	"strings"
 
-	"raccoonci/internal/instabox"
+	"github.com/Raccoon-CI/raccoonci/internal/instabox"
 )
 
 // A job names the size of the machine it wants in its runs-on label:

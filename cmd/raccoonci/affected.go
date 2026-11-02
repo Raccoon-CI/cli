@@ -3,14 +3,14 @@ package main
 import (
 	"flag"
 	"fmt"
+	"github.com/Raccoon-CI/raccoonci/internal/cliutil"
 	"io"
 	"os"
 	"path/filepath"
-	"raccoonci/internal/cliutil"
 	"strings"
 
-	"raccoonci/internal/affected"
-	"raccoonci/internal/workflow"
+	"github.com/Raccoon-CI/raccoonci/internal/affected"
+	"github.com/Raccoon-CI/raccoonci/internal/workflow"
 )
 
 // affectedJobs implements `raccoonci affected`: which jobs the changes

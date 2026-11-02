@@ -1,4 +1,4 @@
-module raccoonci
+module github.com/Raccoon-CI/raccoonci
 
 go 1.27.1
 

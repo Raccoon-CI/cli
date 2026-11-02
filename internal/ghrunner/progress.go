@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"raccoonci/internal/sched"
+	"github.com/Raccoon-CI/raccoonci/internal/sched"
 )
 
 // How long a job running now has left is better read from its steps than

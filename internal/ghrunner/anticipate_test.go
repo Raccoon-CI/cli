@@ -14,9 +14,9 @@ import (
 	"testing"
 	"time"
 
-	"raccoonci/internal/dispatch"
-	"raccoonci/internal/instabox"
-	"raccoonci/internal/sched"
+	"github.com/Raccoon-CI/raccoonci/internal/dispatch"
+	"github.com/Raccoon-CI/raccoonci/internal/instabox"
+	"github.com/Raccoon-CI/raccoonci/internal/sched"
 )
 
 // A GitHub with one run in progress: its job "build" (ours) is running and the job
