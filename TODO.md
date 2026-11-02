@@ -330,7 +330,7 @@ Node.js、Go、Python、Java、Rust、apt 包已经通了（见 B.1 和下面的
 > | # | 决定 | 理由 |
 > |---|---|---|
 > | 1 | 作业图进库（S1：切成两半） | 唯一不让 backend 依赖 runner 的做法；D.7.3 实测 backend 只用 `engine` 的 3 个名字，所以代价小 |
-> | 2 | 仓库名暂用 `lib`/`-backend`/`-runner`/`-cli`/`-frontend`，放在 GitHub 组织 Raccoon-CI 下，module 路径 `github.com/Raccoon-CI/raccoonci-<角色>`；**许可证不选** | 名字和路径只是占位，真拆时一个 `go.mod` 改动；许可证是法律层面且发布后基本不可逆，我不替用户选。准备工作不需要它，真正开源之前必须定 |
+> | 2 | 仓库名暂用 `lib`/`-backend`/`-runner`/`-cli`/`-frontend`，放在 GitHub 组织 Raccoon-CI 下，module 路径 `github.com/Raccoon-CI/raccoonci-<角色>`；**许可证：Apache-2.0（用户 2026-11-02 定，已闭环，见 D.8）** | 名字和路径只是占位，真拆时一个 `go.mod` 改动；许可证由用户定，不是我定的 |
 > | 3 | `serve` 和 `ghrunner` 先放 cli | CLAUDE.md：两条路径都不删、谁是主线未定；放 cli 不关闭任何一条路，以后搬进 backend 只是移动 |
 > | 4 | `instabox` 放库的 `provider/instabox` | 现在只有一个 provider；第二个出现再拆，过早拆是白添一个仓库 |
 > | 5 | 前端技术栈**不选**，现在不写前端 | 没有任何代码依赖这个决定；backend 是纯 JSON API（`openapi.yaml` 是契约），前端以后能用任何栈；先做会白做 |
@@ -341,7 +341,7 @@ Node.js、Go、Python、Java、Rust、apt 包已经通了（见 B.1 和下面的
 > 下面是原来的问题和当时的建议，留作依据。
 
 1. **作业图放哪**：建议 S1 的"切成两半、图进库"。备选：整个 `engine` 放 runner，backend 依赖 runner 仓库（简单，但 backend 会背上 `provision`/`scan` 这些重依赖，也违背"backend 不依赖 runner"）。
-2. **库的名字、仓库组织和 module 路径**，以及开源许可证（我不替你选）。
+2. **库的名字、仓库组织和 module 路径**（许可证已定为 Apache-2.0，见 D.8）。
 3. **`serve`（GitHub 触发路径、`ghrunner`）放 cli 还是以后做成 backend 的一个模块**：CLAUDE.md 说两条路径哪条是主线还没定、都不删。建议先放 cli（它现在就是个命令），backend 想吸收时再搬。
 4. **`instabox` 放库还是单独的 provider 仓库**：DigitalOcean/Linode/Boat.dev 加进来后会有多个 provider；建议现在先放库的 `provider/instabox`，等第二个 provider 出现再决定是否拆。
 5. **前端技术栈**，以及它是否也要由 backend 静态托管。
@@ -392,3 +392,11 @@ Node.js、Go、Python、Java、Rust、apt 包已经通了（见 B.1 和下面的
 
 - **cli 和 runner 的界线**：cli 的 `run`（本机引擎）、`plan` 都要用 runner 仓库的 `engine`、`runner`、`scan`、`provision`、`actions`、`local`、`missing`，也就是说 cli 实际依赖 runner 的大半，runner 仓库里这些包也得公开。**建议**：本机 `raccoonci run` 属于 runner 仓库的二进制（"能执行 workflow 的那个程序"），cli 仓库做面向平台的命令（对 backend 的 API 说话：看 run、日志、触发，外加 `plan`/`match`/`affected`/`catalog`/`serve`）。这样 cli 对 runner 只剩 `plan`（用 `scan`），依赖更清楚。备选：保持现在的"一个 `raccoonci` 命令全都有"，只是放在两个仓库里实现。写进了 D.5 的问题 8。
 - 统计工具本身：想入库的话建议放 `tools/apiscan`，拆分前后都能用来检查"有没有越界依赖"。
+
+## D.8 许可证：Apache-2.0（用户 2026-11-02 定）
+
+- ✅ 仓库根目录有 `LICENSE`：标准 Apache-2.0 全文，与发行版自带的 `/usr/share/common-licenses/Apache-2.0` **逐字节相同**（`cmp` 和 sha256 核对过，11358 字节、202 行）。镜像（`deploy/Dockerfile`）加了标准标签 `org.opencontainers.image.licenses="Apache-2.0"`（`docker build --check` 通过）。
+- ⏸ **版权人和年份：等用户确认再填**。`LICENSE` 附录里是标准的占位 `Copyright [yyyy] [name of copyright owner]`，原样没动，我不编名字。Apache-2.0 并不要求把它填进 `LICENSE` 文件本身——它只是"怎么把许可证用到你的作品上"的示范——真正要写版权人的地方是：①各文件头的版权声明（可选，Apache 建议但不强制）、②`NOTICE` 文件（只在有需要保留的署名声明时才需要，现在没有，所以没建）。用户给出版权人（个人还是组织、写哪个名字）和起始年份后再决定写哪些地方。
+- 没加文件头：几百个文件逐个加会很吵，也没法替用户决定版权人；等上一条定了再说。
+- **依赖的许可证核对**（从 `go list -m all` 的模块缓存里读 `LICENSE`，粗分类）：Apache-2.0 14 个、BSD 24 个、MIT 4 个，没有 GPL/AGPL/LGPL。例外：①`github.com/hashicorp/golang-lru/v2` 是 **MPL-2.0**（文件级 copyleft），经 `modernc.org/sqlite` 进入服务端二进制；未修改地使用，与 Apache-2.0 兼容，不要求我们的代码也用 MPL，但**发布二进制或镜像时要附带第三方许可证声明**（见下）；②`github.com/kr/pretty`、`kr/text` 的模块里没有 LICENSE 文件，但它们不在本仓库任何二进制或测试的构建里（只在别的模块的测试依赖图里），所以不影响。
+- **还要做**：①发第一个版本前生成第三方许可证声明（`THIRD_PARTY_NOTICES`，把依赖的版权声明和许可证文本汇总；工具如 `go-licenses`，这台机器没装，且要联网装，没做）；②拆仓库时每个仓库放一份同样的 `LICENSE`；③`docs/gha-compat.md` 里说 act、Gitea 的代码可以"带署名地引用或复用"：我们目前只是参考没有拷贝代码，若以后拷贝，要保留它们的版权声明（MIT 要求），并写进 `NOTICE`。
