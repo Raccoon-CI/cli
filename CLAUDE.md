@@ -29,7 +29,7 @@ make runner-images        # refresh the embedded snapshot of GitHub's Ubuntu run
 
 - `cmd/<binary>/main.go`: one directory per executable. Keep `main` thin: parse flags, wire dependencies, call into `internal/`.
 - `internal/<pkg>/`: all application logic goes here (not importable from outside the module).
-- `cmd/raccoonci-runner` is the machine side of `raccoonci` (`agent`, `run-instance`, `runner-snapshot`, `-version`; built-in catalog only). `cmd/raccoonci` still offers the same commands; both call `internal/runnercmd`, which holds the machine-side commands (`Agent`, `RunInstance`, `Snapshot`, `RunEnv`). `run` (the local engine) is still only in `raccoonci`, so existing runner snapshots keep installing `raccoonci` (TODO D.3 S5, D.5 decision 8). Flag types shared by commands live in `internal/cliflag`.
+- `cmd/raccoonci-runner` is the machine side of `raccoonci` (`run` without `-on`, `agent`, `run-instance`, `runner-snapshot`, `-version`; built-in catalog only). `cmd/raccoonci` still offers the same commands; both call `internal/runnercmd`, which holds the machine-side commands (`Run` = the local engine, `Agent`, `RunInstance`, `Snapshot`, `RunEnv`, the run-time services). `raccoonci run -on instabox` stays in `cmd/raccoonci` (`runremote.go`, `remote.go`): it hands `runnercmd.Run` a `RemoteSession`. Existing runner snapshots still install `raccoonci`, not `raccoonci-runner` (TODO D.3 S5). Small helpers shared by commands live in `internal/cliutil` and `internal/cliflag`.
 - `version` lives in `package main` and is set through `-ldflags "-X main.version=..."` in the Makefile.
 
 New binaries also need to be added to the `build` target in the Makefile.
