@@ -339,7 +339,7 @@ Node.js、Go、Python、Java、Rust、apt 包已经通了（见 B.1 和下面的
 ## D.4 搬的顺序和办法
 
 1. S1–S5 全部做完并提交，`make check` 绿。
-2. 用 `git filter-repo --path …`（或 `git subtree split`）从本仓库**保留历史**地切出库仓库；库先发 `v0.1.0`，带 `CHANGELOG`。**注意一段坏历史**：提交 `0c3ca27` 到 `45906d6`（含）之间，`internal/engine/engine.go` 因为我一次错误的按块暂存而无法编译，`421c793` 才修好；这一段里的提交单独检出会编译失败（`git bisect` 会踩到）。拆分时要么接受并在库/runner 仓库的说明里写明，要么在切历史前把 `421c793` 的修复用 `git rebase`/`fixup` 并回去（这会改写已有提交的 id，要你同意再做）。
+2. 用 `git filter-repo --path …`（或 `git subtree split`）从本仓库**保留历史**地切出库仓库；库先发 `v0.1.0`，带 `CHANGELOG`。**注意一段坏历史**：提交 `0c3ca27` 到 `45906d6`（含）之间，`internal/engine/engine.go` 因为我一次错误的按块暂存而无法编译，`421c793` 才修好；这一段里的提交单独检出会编译失败（`git bisect` 会踩到）。拆分时要么接受并在库/runner 仓库的说明里写明，要么在切历史前把 `421c793` 的修复用 `git rebase`/`fixup` 并回去（这会改写已有提交的 id，要你同意再做）。**用户 2026-11-02 定：先不动，接受这段坏历史、不改写**；拆出的每个仓库的说明里写一句"`git bisect` 时请 `skip` `0c3ca27` 到 `45906d6`，`421c793` 已修复"；真拆库时再看要不要顺手修（`git filter-repo` 本来就要改写历史，那时成本最低，且拆出的是新仓库，不会让现有提交 id 的引用失效）。
 3. runner、backend、cli 依次切出，各自 `go.mod` 依赖库的固定版本（开发期可以用 `go.work` 把几个仓库连起来一起改）。
 4. 每个仓库自己的 CI：用 Raccoon CI 跑自己（`.github/workflows/ci.yml`，`make check`），backend 加上"`openapi.yaml` 和路由一致"的测试（已有）。
 5. 文档：沿用"英文 `x.md` + 中文 `x.zh.md`"；`TODO.md` 按 A/B/C 切：A（GitHub 触发路径）→ cli，B（自有引擎）→ runner，C.1 → backend，C.2（provider）→ 库或 backend，C.3 已在 raccoonbench。`CLAUDE.md` 每个仓库一份，各写各的。
