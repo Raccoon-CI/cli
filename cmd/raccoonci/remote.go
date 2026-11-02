@@ -207,7 +207,7 @@ func (rr *remoteRun) restore(inst engine.RemoteInstance) (key, from string) {
 // snapshot for key. Only a successful run that started from the runner
 // snapshot, on a trusted event and with no secrets in play (a job can leave
 // them on disk, and a snapshot copies the disks), and only one machine per key.
-func (rr *remoteRun) keep(key string, reader *wireReader) string {
+func (rr *remoteRun) keep(key string, reader *wire.Reader) string {
 	if key == "" {
 		return ""
 	}
@@ -279,12 +279,12 @@ func (rr *remoteRun) run(ctx context.Context, inst engine.RemoteInstance) (runne
 	if err != nil {
 		return runner.Result{}, err
 	}
-	input, err := json.Marshal(instanceSpec{Protocol: wire.Version, Workflow: rr.workflow, Job: inst.Job.ID, Contexts: contexts,
+	input, err := json.Marshal(wire.InstanceSpec{Protocol: wire.Version, Workflow: rr.workflow, Job: inst.Job.ID, Contexts: contexts,
 		ServiceEnv: svcEnv, Install: rr.install})
 	if err != nil {
 		return runner.Result{}, err
 	}
-	reader := &wireReader{Name: inst.Name, Event: rr.event}
+	reader := &wire.Reader{Name: inst.Name, Event: rr.event}
 	defer reader.Flush()
 	job := dispatch.Job{
 		Command: "run-instance",
@@ -340,7 +340,7 @@ func (rr *remoteRun) run(ctx context.Context, inst engine.RemoteInstance) (runne
 
 // finish turns what the machine reported into the instance's result, and
 // remembers how long a successful job took there.
-func (rr *remoteRun) finish(histKey string, reader *wireReader, res dispatch.Result, err error) (runner.Result, error) {
+func (rr *remoteRun) finish(histKey string, reader *wire.Reader, res dispatch.Result, err error) (runner.Result, error) {
 	if err != nil {
 		return runner.Result{}, err
 	}

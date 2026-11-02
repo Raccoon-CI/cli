@@ -13,12 +13,13 @@ import (
 	"raccoonci/internal/envsnap"
 	"raccoonci/internal/instabox"
 	"raccoonci/internal/runner"
+	"raccoonci/internal/wire"
 	"slices"
 	"strings"
 	"testing"
 )
 
-func snapRun(t *testing.T, lock string) (*remoteRun, *wireReader) {
+func snapRun(t *testing.T, lock string) (*remoteRun, *wire.Reader) {
 	t.Helper()
 	repo := t.TempDir()
 	os.WriteFile(filepath.Join(repo, "go.mod"), []byte("module x\n"), 0o644)
@@ -34,7 +35,7 @@ func snapRun(t *testing.T, lock string) (*remoteRun, *wireReader) {
 	}
 	rr := &remoteRun{provider: &instabox.Provider{Snapshot: "sn_base"}, snaps: idx, cat: catalog.Default(),
 		repoFS: root.FS(), trusted: true}
-	reader := &wireReader{Event: func(runner.Event) {}}
+	reader := &wire.Reader{Event: func(runner.Event) {}}
 	reader.Write([]byte(`{"result":{"conclusion":"success","outputs":{}}}` + "\n"))
 	return rr, reader
 }
@@ -80,7 +81,7 @@ func TestNoSnapshotFromAnUntrustedOrRiskyRun(t *testing.T) {
 	}
 	// A failed job leaves a half-installed environment.
 	rr, _ := snapRun(t, "a\n")
-	failed := &wireReader{Event: func(runner.Event) {}}
+	failed := &wire.Reader{Event: func(runner.Event) {}}
 	failed.Write([]byte(`{"result":{"conclusion":"failure","outputs":{}}}` + "\n"))
 	key, _ := rr.restore(inst)
 	if got := rr.keep(key, failed); got != "" {

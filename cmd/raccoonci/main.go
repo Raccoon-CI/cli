@@ -19,6 +19,7 @@ import (
 	"raccoonci/internal/envsnap"
 	"raccoonci/internal/plan"
 	"raccoonci/internal/platform"
+	"raccoonci/internal/runnercmd"
 	"raccoonci/internal/runnerimages"
 	"raccoonci/internal/scan"
 	"raccoonci/internal/workflow"
@@ -116,11 +117,11 @@ func main() {
 			os.Exit(1)
 		}
 	case len(args) >= 1 && args[0] == "run-instance": // started by the agent
-		err = runInstance(args[1:], cat)
+		err = runnercmd.RunInstance(args[1:], cat)
 	case len(args) >= 1 && args[0] == "runner-snapshot":
-		err = runnerSnapshot(args[1:])
+		err = runnercmd.Snapshot(args[1:])
 	case len(args) >= 1 && args[0] == "agent":
-		err = runAgent(args[1:])
+		err = runnercmd.Agent(args[1:])
 	case len(args) == 3 && args[0] == "runner-images" && args[1] == "update":
 		err = updateRunnerImages(args[2], cat)
 	default:

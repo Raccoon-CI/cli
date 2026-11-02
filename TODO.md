@@ -309,7 +309,7 @@ Node.js、Go、Python、Java、Rust、apt 包已经通了（见 B.1 和下面的
 - ✅ **S2 把 `runner.Event`/`Result`/`Conclusion`/`EventKind` 挪到不依赖执行的包**（2026-11-02 做完）：新包 `internal/runevent` 只放这些数据类型和常量（只依赖 `value`），`runner` 里改成类型别名和常量别名，所以所有 `runner.Event`、`runner.Success` 的老写法不变；`wire` 已直接改用 `runevent`。守护测试：`wire` 的传递依赖只能是 `runevent` 和 `value`（变异检查：让 `wire` 重新 import `runner`，测试失败并列出被拖进来的 9 个包）；`runevent` 只能 import `value`；事件类型的编号和结论的字符串固定（它们在线上跑着旧二进制的机器之间传）。**还没改的**：backend 的 `internal/server/execute`、`local`、`cmd/raccoonci` 仍写 `runner.Event` 等（别名保证能用）；backend 对 `runner` 剩下的依赖是 `runner.Config`（`engine.Options.Runner`），要等 S1 把 `engine` 切开才能去掉。
 - ✅ **S3 `dispatch` 里 agent 一侧与主控一侧分清、协议有版本号**（2026-11-02 做完）：核对后 `dispatch` 本来就按文件分了（`agent.go` 机器一侧，`controller.go` 主控一侧，`tar.go` 共用），所以真正缺的是**版本号**，已加：`dispatch.ProtocolVersion = 1`、请求头 `X-Raccoonci-Protocol`（agent 每个请求带自己的，主控每个回复带自己的），`wire.Version` 和 `InstanceSpec.Protocol`（任务的版本）。规则写在 `dispatch/protocol.go` 和 `docs/server-design*.md`：只加可选内容不升版本，改含义或删东西才升，主控支持 `MinProtocolVersion` 到自己的所有版本；**没带版本的老 agent/老主控算 1**（已部署的 runner 快照就是这样，所以不用重建快照）；比主控新的 agent 被拒绝，**这个 run 立刻以原因结束**而不是等机器超时；`run-instance` 拒绝比自己新的任务并说明"快照比主控旧，要重建"。单测：dispatch 5 个（两边都说 1、老 agent 无头照常服务、新 agent 被拒且 run 带着原因结束、新主控服务老 agent、头不合法 400）、真二进制 1 个、执行器断言每个任务带版本。**没做**：agent 一侧在主控比自己旧时的处理（现在没有比 1 更旧的，所以没有可测的情形）；`dispatch` 的客户端（`Agent`）仍和 `Controller` 在同一个包里，拆仓库时按 D.2 它们一起进库（协议在库、agent 的进程在 runner）。
 - **S4 改 module 路径**：现在是 `raccoonci`，各仓库要真实的路径（`github.com/Raccoon-CI/…`）；`internal/` 在跨仓库后不能再 import，所以库里要导出的包要从 `internal/` 挪出来（`pkg/` 或顶层），并想清哪些是对外稳定的 API、哪些仍是内部。
-- **S5 `cmd/raccoonci` 按角色拆成几个 `main`**（agent/run-instance 一个、run/plan/... 一个），先在同一仓库里分开，确认测试和 `make` 目标都跟着走，再搬。
+- 🟡 **S5 `cmd/raccoonci` 按角色拆成几个 `main`**。**第一步已做（2026-11-02）**：试验表明机器一侧的文件几乎没有缠在 cli 里（分开后 runner 一侧只缺一个 `listFlag`），所以把 `agent.go`、`instance.go`、`runenv.go`、`runnersnap.go` 和 `agent_test.go` 用 `git mv`（历史保留）搬进新包 `internal/runnercmd`（导出 `Agent`、`RunInstance`、`Snapshot`、`NewRunEnv`/`RunEnv`/`ValidInstall`），共用的 `listFlag` 抽成 `internal/cliflag.List`；`cmd/raccoonci` 的 `main.go` 改为调用它们，`remote.go` 直接用 `wire.*`（原来经 `instance.go` 里的别名）；新增**很薄的** `cmd/raccoonci-runner`（`agent`/`run-instance`/`runner-snapshot`/`-version`，只用内置 catalog，已加进 `make build`）。两个二进制共用同一份代码，`TestRunInstanceOverTheWire` 对两个都跑。**没动的**：`cmd/raccoonci/run.go` 和 `serve.go`（另一个会话还有未提交的改动），所以 `cmd/raccoonci/runenv.go` 留了一个 5 个字段的**适配层**（`runEnv` 镜像 `runnercmd.RunEnv`），`run.go` 一行没改；`run.go` 里还有自己的 `listFlag`。**还要做**：①等 `run.go` 空出来，删适配层和重复的 `listFlag`；②按决定 #8 把 `run`（本机引擎）也搬进 runner 的二进制——现在 `raccoonci-runner` 没有 `run`，而 agent 的 `Job.Command` 还允许 `run`（基准的"旧版本一台机器"用它），所以**现有 runner 快照仍安装 `raccoonci`**，没改；③`CLAUDE.md` 的布局说明要补一行 `cmd/raccoonci-runner` 和 `internal/runnercmd`（那个文件也有别的会话的未提交改动，没碰）。
 
 ## D.4 搬的顺序和办法
 
@@ -322,6 +322,21 @@ Node.js、Go、Python、Java、Rust、apt 包已经通了（见 B.1 和下面的
 7. 版本和兼容：每个仓库独立 semver；**协议有自己的版本号**（`dispatch` 控制器↔agent、`wire`/`InstanceSpec`、backend 的 `/v1` API）；已经在用的"旧机器忽略新字段"的做法（`InstanceSpec.Images`）要成为规则：协议只加可选字段、不改旧字段含义，不兼容的变化升大版本并让 backend 同时支持上一版的 agent。
 
 ## D.5 要你定的（我先给了建议，但这些是产品/组织层面的）
+
+> **2026-11-02 16:14 用户授权：需要拍板的事按 TODO 和既定原则选最稳妥的方案、记下理由、继续做（花钱、删用户别的资源、不可逆的除外）；真正拆成独立仓库仍要等用户确认。** 下面每一条的"决定"就是据此选的。它们**只影响拆分前的准备工作**，没有一个是不可逆的，用户随时可以推翻。
+>
+> | # | 决定 | 理由 |
+> |---|---|---|
+> | 1 | 作业图进库（S1：切成两半） | 唯一不让 backend 依赖 runner 的做法；D.7.3 实测 backend 只用 `engine` 的 3 个名字，所以代价小 |
+> | 2 | 仓库名暂用 `lib`/`-backend`/`-runner`/`-cli`/`-frontend`，放在 GitHub 组织 Raccoon-CI 下，module 路径 `github.com/Raccoon-CI/raccoonci-<角色>`；**许可证不选** | 名字和路径只是占位，真拆时一个 `go.mod` 改动；许可证是法律层面且发布后基本不可逆，我不替用户选。准备工作不需要它，真正开源之前必须定 |
+> | 3 | `serve` 和 `ghrunner` 先放 cli | CLAUDE.md：两条路径都不删、谁是主线未定；放 cli 不关闭任何一条路，以后搬进 backend 只是移动 |
+> | 4 | `instabox` 放库的 `provider/instabox` | 现在只有一个 provider；第二个出现再拆，过早拆是白添一个仓库 |
+> | 5 | 前端技术栈**不选**，现在不写前端 | 没有任何代码依赖这个决定；backend 是纯 JSON API（`openapi.yaml` 是契约），前端以后能用任何栈；先做会白做 |
+> | 6 | 公开 API：只承诺 `value`、`workflow`、`expr`、`trigger`、`catalog` 的数据结构和 `wire`/`dispatch` 协议；其余写明不稳定（0.x） | 承诺越少以后越自由；协议已经有版本号（S3） |
+> | 7 | 集成测试用环境变量开关、默认跳过 | 和现有 `TestReal*` 一致；不让别的贡献者必须有 InstaBox 账号才能 `make check` |
+> | 8 | 本机 `raccoonci run` 放 runner 仓库的二进制，cli 做面向平台的命令 | D.7.4：这样 cli 对 runner 的依赖最小；可逆（命令在哪个仓库只是搬文件） |
+>
+> 下面是原来的问题和当时的建议，留作依据。
 
 1. **作业图放哪**：建议 S1 的"切成两半、图进库"。备选：整个 `engine` 放 runner，backend 依赖 runner 仓库（简单，但 backend 会背上 `provision`/`scan` 这些重依赖，也违背"backend 不依赖 runner"）。
 2. **库的名字、仓库组织和 module 路径**，以及开源许可证（我不替你选）。

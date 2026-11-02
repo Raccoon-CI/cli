@@ -1,58 +1,30 @@
 package main
 
 import (
-	"fmt"
-	"os"
-	"path/filepath"
-
 	"raccoonci/internal/catalog"
 	"raccoonci/internal/nodejs"
 	"raccoonci/internal/provision"
+	"raccoonci/internal/runnercmd"
 )
 
-// runEnv is what a machine needs to run job instances besides the workflow:
-// the Node.js runtimes for actions, the tool cache and the provisioner. `run`
-// and `run-instance` build it the same way.
+// runEnv is runnercmd.RunEnv under the names `run` has always used for its
+// fields. It is an adapter that exists so that run.go did not have to change
+// when the machine side moved out of this package; it goes when `run` itself
+// moves to the runner (TODO D.5, decision 8).
 type runEnv struct {
-	cacheDir  string // <user cache>/raccoonci
+	cacheDir  string
 	node      *nodejs.Runtime
-	nodeMusl  *nodejs.Runtime // for job containers on musl images (Alpine)
+	nodeMusl  *nodejs.Runtime
 	toolCache string
-	prov      *provision.Provisioner // nil with -install none
+	prov      *provision.Provisioner
 }
 
-func validInstall(install string) error {
-	switch install {
-	case "none", "toolchains", "all":
-		return nil
-	}
-	return fmt.Errorf("-install %q: want none, toolchains or all", install)
-}
+func validInstall(install string) error { return runnercmd.ValidInstall(install) }
 
 func newRunEnv(cat *catalog.Catalog, install string) (*runEnv, error) {
-	cache, err := os.UserCacheDir()
+	e, err := runnercmd.NewRunEnv(cat, install)
 	if err != nil {
 		return nil, err
 	}
-	rt := &runEnv{cacheDir: filepath.Join(cache, "raccoonci")}
-	rt.node = nodejs.New(filepath.Join(rt.cacheDir, "node"))
-	rt.node.Catalog = cat
-	// Inside node.Dir, so the mount that gives containers the Node.js
-	// runtimes covers it.
-	rt.nodeMusl = nodejs.NewMusl(filepath.Join(rt.node.Dir, "musl"))
-	rt.nodeMusl.Catalog = cat
-	rt.toolCache = filepath.Join(rt.cacheDir, "toolcache")
-	switch install {
-	case "none":
-	case "toolchains", "all":
-		rt.prov = &provision.Provisioner{ToolCache: rt.toolCache, Catalog: cat, Installers: provision.DefaultInstallers(nil)}
-		if install == "all" {
-			if rt.prov.Apt, err = provision.NewApt(); err != nil {
-				fmt.Fprintf(os.Stderr, "raccoonci: -install=all: %v; missing packages will only be reported\n", err)
-			}
-		}
-	default:
-		return nil, fmt.Errorf("-install %q: want none, toolchains or all", install)
-	}
-	return rt, nil
+	return &runEnv{cacheDir: e.CacheDir, node: e.Node, nodeMusl: e.NodeMusl, toolCache: e.ToolCache, prov: e.Prov}, nil
 }
