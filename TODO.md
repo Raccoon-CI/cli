@@ -237,7 +237,7 @@ Node.js、Go、Python、Java、Rust、apt 包已经通了（见 B.1 和下面的
 - ⬜ 把状态回写 GitHub（checks / statuses）（第 3 步）
 - ⬜ secrets / vars 的加密存储
 - ⬜ 凭证和机密放数据库（服务端版本）：现在缓存桶的密钥只从环境变量读（`cmd/raccoonci/cachestore.go` 是唯一读环境变量的地方，`blob.S3Config` 已经是"一个桶的配置"，服务端按组织/仓库从库里取出后 `blob.NewS3` 即可，缓存服务不用改）；workflow 的 `-secret` 也是本地环境变量。服务端要做：信封加密入库（主密钥来自 KMS 或服务启动配置，读出后只在内存用，日志和 API 响应里不出现）；按组织/仓库隔离，不同租户不同桶或不同前缀；能用短期凭证（STS）就不存长期密钥，并支持轮换；机器永远拿不到桶密钥，只拿预签名链接；workflow 机密只在派发任务时解密，并和"InstaBox Org Secret 占位符代理换头"一起设计，让机器上根本没有真值
-- ⬜ 工作目录清理与磁盘配额（现在 workdir 只增不减）
+- 🟡 工作目录清理（2026-11-02，**未提交**）：服务启动时（在把中断的 run 重新排队之后）清空执行器的 `work/`、本机 runner 的 `jobs/`，以及 artifact 和 cache 两个上传暂存目录（`artifacts/spool`、`caches/cache-spool`）：崩溃时没来得及删的残留。前提是一个数据目录只有一个服务在用（第一版就是单实例）。正常结束的 run 本来就会删自己的目录。单测 4 个（执行器+本机 runner、两个暂存目录）。没做：磁盘配额（运行中的 run 的源码包和暂存可以把盘写满）；没有在真机上看到崩溃后清理（只有单测）
 - ⬜ 服务端定期轮询 runner-images（ETag + 存库），目前只有命令行手动更新
 - ⬜ 来自 fork PR 的 workflow 的 secrets 策略
 - ⬜ catalog feed：默认地址（还没发布，**不能编一个**）、签名生成流程和工具
