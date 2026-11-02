@@ -9,7 +9,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
-	"path/filepath"
+	"raccoonci/internal/cliutil"
 	"slices"
 	"strings"
 	"time"
@@ -185,7 +185,7 @@ func printPlan(out io.Writer, path string, cat *catalog.Catalog, fetchActions bo
 		defer os.RemoveAll(dir)
 		opts.Action = actions.NewStore(dir, os.Getenv("GITHUB_TOKEN")).Lookup(context.Background())
 	}
-	if root, ok := repoRoot(path); ok {
+	if root, ok := cliutil.RepoRoot(path); ok {
 		r, err := os.OpenRoot(root) // confines reads to the repo, even through symlinks
 		if err != nil {
 			return err
@@ -246,20 +246,6 @@ func printPlan(out io.Writer, path string, cat *catalog.Catalog, fetchActions bo
 		fmt.Fprintf(out, "\nwarning: %d job run(s) need an OS Raccoon CI cannot provide yet; they will fail unless you connect your own machine\n", unavailable)
 	}
 	return nil
-}
-
-// repoRoot finds the repository a workflow file belongs to, by its
-// .github/workflows location.
-func repoRoot(workflowPath string) (string, bool) {
-	abs, err := filepath.Abs(workflowPath)
-	if err != nil {
-		return "", false
-	}
-	dir := filepath.Dir(abs)
-	if filepath.Base(dir) != "workflows" || filepath.Base(filepath.Dir(dir)) != ".github" {
-		return "", false
-	}
-	return filepath.Dir(filepath.Dir(dir)), true
 }
 
 // snapshotNote says whether an instance's installed dependencies could be kept

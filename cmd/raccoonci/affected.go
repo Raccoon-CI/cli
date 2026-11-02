@@ -4,41 +4,21 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"io/fs"
 	"os"
 	"path/filepath"
+	"raccoonci/internal/cliutil"
 	"strings"
 
 	"raccoonci/internal/affected"
 	"raccoonci/internal/workflow"
 )
 
-// unaffected builds engine.Options.Unaffected from the changed files: a job is
-// left out when none of them concerns it and leaving it out is safe.
-func unaffected(w *workflow.Workflow, repo fs.FS, wfPath string, files []string) (func(*workflow.Job) (string, bool), error) {
-	cfg, err := affected.LoadConfig(repo)
-	if err != nil {
-		return nil, err
-	}
-	decisions := affected.Decide(affected.Input{Workflow: w, WorkflowPath: wfPath, Files: files, Repo: repo, Config: cfg})
-	return func(j *workflow.Job) (string, bool) {
-		d, ok := decisions[j.ID]
-		if !ok || d.Affected {
-			return "", false
-		}
-		if safe, _ := affected.Skippable(j); !safe {
-			return "", false
-		}
-		return "none of the " + fmt.Sprint(len(files)) + " changed files concerns it (" + d.Reason + ")", true
-	}, nil
-}
-
 // affectedJobs implements `raccoonci affected`: which jobs the changes
 // concern, and why.
 func affectedJobs(out io.Writer, args []string) error {
 	fs := flag.NewFlagSet("affected", flag.ExitOnError)
-	var ef eventFlags
-	ef.register(fs, true)
+	var ef cliutil.EventFlags
+	ef.Register(fs, true)
 	pkgs := fs.Bool("packages", false, "also list the workspace packages found and what they depend on")
 	fs.Usage = func() {
 		fmt.Fprintln(fs.Output(), "usage: raccoonci affected [flags] <workflow.yml>")
@@ -58,22 +38,22 @@ func affectedJobs(out io.Writer, args []string) error {
 	if err != nil {
 		return fmt.Errorf("%s: %w", path, err)
 	}
-	repo, found := repoRoot(path)
+	repo, found := cliutil.RepoRoot(path)
 	if !found {
-		repo = gitTopLevel(filepath.Dir(path))
+		repo = cliutil.GitTopLevel(filepath.Dir(path))
 	}
 	root, err := os.OpenRoot(repo)
 	if err != nil {
 		return err
 	}
 	defer root.Close()
-	rel, err := filepath.Rel(repo, absPath(path))
+	rel, err := filepath.Rel(repo, cliutil.AbsPath(path))
 	if err != nil || strings.HasPrefix(rel, "..") {
 		return fmt.Errorf("%s is outside its repository %s", path, repo)
 	}
 	rel = filepath.ToSlash(rel)
 
-	ev := ef.event(repo, ef.name)
+	ev := ef.Event(repo, ef.Name)
 	cfg, err := affected.LoadConfig(root.FS())
 	if err != nil {
 		return err

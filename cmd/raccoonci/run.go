@@ -3,9 +3,6 @@ package main
 import (
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
-	"encoding/hex"
-	"errors"
 	"flag"
 	"fmt"
 	"maps"
@@ -13,7 +10,6 @@ import (
 	"net/http"
 	"net/netip"
 	"os"
-	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"raccoonci/internal/missing"
@@ -28,6 +24,7 @@ import (
 	"raccoonci/internal/cache"
 	"raccoonci/internal/catalog"
 	"raccoonci/internal/cliflag"
+	"raccoonci/internal/cliutil"
 	"raccoonci/internal/dispatch"
 	"raccoonci/internal/engine"
 	"raccoonci/internal/envsnap"
@@ -60,8 +57,8 @@ func runWorkflow(args []string, cat *catalog.Catalog, remote *remoteFlags) (ok b
 	debug := fs.Bool("debug", false, "show ::debug:: output")
 	cacheProtocol := fs.String("cache-protocol", "v1", "which actions/cache protocol to offer steps: v1 or v2 (both read and write the same entries)")
 	cacheLimitGB := fs.Int("cache-limit-gb", 10, "the most the cache of a repository may hold, in GiB (GitHub allows 10); the least recently used entries are evicted first; 0 means no limit")
-	var evFlags eventFlags
-	evFlags.register(fs, false)
+	var evFlags cliutil.EventFlags
+	evFlags.Register(fs, false)
 	onlyIfTriggered := fs.Bool("only-if-triggered", false, "run nothing unless the workflow's on: (branches, tags, paths, types) is triggered by the event, described by -event, -ref, -base-ref, -file ...; by default `run` assumes it is")
 	onlyAffected := fs.Bool("affected", false, "leave out the jobs the changed files do not concern (see `raccoonci affected`); the changes come from git, or -file/-before")
 	usageFile := fs.String("usage-file", "", "with -on: write what each machine used (when it was requested, ready and deleted, its size) to this file, one JSON object per line; money is worked out from it, not stored")
@@ -97,9 +94,9 @@ func runWorkflow(args []string, cat *catalog.Catalog, remote *remoteFlags) (ok b
 	if err != nil {
 		return false, fmt.Errorf("%s: %w", path, err)
 	}
-	repo, ok := repoRoot(path)
+	repo, ok := cliutil.RepoRoot(path)
 	if !ok {
-		repo = gitTopLevel(filepath.Dir(path))
+		repo = cliutil.GitTopLevel(filepath.Dir(path))
 	}
 
 	secretValues := map[string]string{}
@@ -113,11 +110,11 @@ func runWorkflow(args []string, cat *catalog.Catalog, remote *remoteFlags) (ok b
 		}
 		secretValues[name] = v
 	}
-	varObj, err := keyValues("-var", vars)
+	varObj, err := cliutil.KeyValues("-var", vars)
 	if err != nil {
 		return false, err
 	}
-	inputObj, err := keyValues("-input", inputs)
+	inputObj, err := cliutil.KeyValues("-input", inputs)
 	if err != nil {
 		return false, err
 	}
@@ -133,7 +130,7 @@ func runWorkflow(args []string, cat *catalog.Catalog, remote *remoteFlags) (ok b
 		}
 	}
 	if *onlyIfTriggered {
-		res, err := trigger.Match(w.On, evFlags.event(repo, *event))
+		res, err := trigger.Match(w.On, evFlags.Event(repo, *event))
 		if err != nil {
 			return false, fmt.Errorf("%s: %w", path, err)
 		}
@@ -202,12 +199,12 @@ func runWorkflow(args []string, cat *catalog.Catalog, remote *remoteFlags) (ok b
 
 	var unaffectedFn func(*workflow.Job) (string, bool)
 	if *onlyAffected {
-		wfRel, err := filepath.Rel(repo, absPath(path))
+		wfRel, err := filepath.Rel(repo, cliutil.AbsPath(path))
 		if err != nil || strings.HasPrefix(wfRel, "..") {
 			return false, fmt.Errorf("%s is outside its repository %s", path, repo)
 		}
-		ev := evFlags.event(repo, *event)
-		if unaffectedFn, err = unaffected(w, repoDir.FS(), filepath.ToSlash(wfRel), ev.Files); err != nil {
+		ev := evFlags.Event(repo, *event)
+		if unaffectedFn, err = cliutil.Unaffected(w, repoDir.FS(), filepath.ToSlash(wfRel), ev.Files); err != nil {
 			return false, err
 		}
 	}
@@ -229,7 +226,7 @@ func runWorkflow(args []string, cat *catalog.Catalog, remote *remoteFlags) (ok b
 			StartAgent:    remote.startAgent,
 			Logf:          func(f string, a ...any) { fmt.Fprintf(os.Stderr, "raccoonci: "+f+"\n", a...) },
 		})
-		rel, err := filepath.Rel(repo, absPath(path))
+		rel, err := filepath.Rel(repo, cliutil.AbsPath(path))
 		if err != nil || strings.HasPrefix(rel, "..") {
 			return false, fmt.Errorf("%s is outside its repository %s", path, repo)
 		}
@@ -241,7 +238,7 @@ func runWorkflow(args []string, cat *catalog.Catalog, remote *remoteFlags) (ok b
 		}
 		if !*noPack {
 			histDir := filepath.Join(cache, "sched")
-			hist, err := sched.OpenHistory(filepath.Join(histDir, repoDirName(repository.(string))+".json"))
+			hist, err := sched.OpenHistory(filepath.Join(histDir, cliutil.RepoDirName(repository.(string))+".json"))
 			if err != nil {
 				return false, err
 			}
@@ -254,7 +251,7 @@ func runWorkflow(args []string, cat *catalog.Catalog, remote *remoteFlags) (ok b
 			if err := os.MkdirAll(idxDir, 0o755); err != nil {
 				return false, err
 			}
-			if rr.snaps, err = envsnap.Open(filepath.Join(idxDir, repoDirName(repository.(string))+".json"), *envSnapshots); err != nil {
+			if rr.snaps, err = envsnap.Open(filepath.Join(idxDir, cliutil.RepoDirName(repository.(string))+".json"), *envSnapshots); err != nil {
 				return false, err
 			}
 			rr.cat, rr.repoFS = cat, repoDir.FS()
@@ -268,23 +265,23 @@ func runWorkflow(args []string, cat *catalog.Catalog, remote *remoteFlags) (ok b
 	}
 	var missingStore *missing.Store
 	var wfID string
-	if rel, err := filepath.Rel(repo, absPath(path)); err == nil && !strings.HasPrefix(rel, "..") {
+	if rel, err := filepath.Rel(repo, cliutil.AbsPath(path)); err == nil && !strings.HasPrefix(rel, "..") {
 		wfID = filepath.ToSlash(rel)
 	}
 	if rt.Prov != nil && remote == nil {
 		// Only a local run provisions here; a machine of -on instabox has
 		// its own run-instance and is deleted afterwards.
-		if missingStore, err = missing.Open(filepath.Join(rt.CacheDir, "missing", repoDirName(repository.(string))+".json")); err != nil {
+		if missingStore, err = missing.Open(filepath.Join(rt.CacheDir, "missing", cliutil.RepoDirName(repository.(string))+".json")); err != nil {
 			fmt.Fprintf(os.Stderr, "raccoonci: remembering missing commands is off: %v\n", err)
 			missingStore = nil
 		}
 	}
-	cacheBucket, err := s3f.store(repoDirName(repository.(string)))
+	cacheBucket, err := s3f.store(cliutil.RepoDirName(repository.(string)))
 	if err != nil {
 		return false, err
 	}
 	svc, err := localServices(filepath.Join(*workDir, "_artifacts"),
-		filepath.Join(cache, "actions-cache", repoDirName(repository.(string))), runID.(string), *cacheProtocol == "v2", int64(*cacheLimitGB)<<30, serve, cacheBucket)
+		filepath.Join(cache, "actions-cache", cliutil.RepoDirName(repository.(string))), runID.(string), *cacheProtocol == "v2", int64(*cacheLimitGB)<<30, serve, cacheBucket)
 	if err != nil {
 		return false, fmt.Errorf("artifact service: %w", err)
 	}
@@ -356,50 +353,6 @@ func runWorkflow(args []string, cat *catalog.Catalog, remote *remoteFlags) (ok b
 		fmt.Printf("%-8s %s\n", j.Conclusion, j.ID)
 	}
 	return res.Conclusion == runner.Success, nil
-}
-
-func absPath(p string) string {
-	if abs, err := filepath.Abs(p); err == nil {
-		return abs
-	}
-	return p
-}
-
-func keyValues(flagName string, list []string) (value.Object, error) {
-	var o value.Object
-	for _, kv := range list {
-		k, v, ok := strings.Cut(kv, "=")
-		if !ok || k == "" {
-			return nil, fmt.Errorf("%s %q: want NAME=VALUE", flagName, kv)
-		}
-		o = o.Set(k, v)
-	}
-	return o, nil
-}
-
-func gitTopLevel(dir string) string {
-	out, err := exec.Command("git", "-C", dir, "rev-parse", "--show-toplevel").Output()
-	if err != nil {
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) || errors.Is(err, exec.ErrNotFound) {
-			abs, _ := filepath.Abs(dir)
-			return abs
-		}
-	}
-	return strings.TrimSpace(string(out))
-}
-
-// repoDirName turns "owner/name" into a directory name that cannot collide
-// with another repository's, whatever characters the names hold.
-func repoDirName(repository string) string {
-	sum := sha256.Sum256([]byte(repository))
-	safe := strings.Map(func(r rune) rune {
-		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-' || r == '_' || r == '.' {
-			return r
-		}
-		return '_'
-	}, repository)
-	return hex.EncodeToString(sum[:4]) + "-" + safe
 }
 
 // services are the runtime services steps call (artifacts and the cache).
