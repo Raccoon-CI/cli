@@ -91,6 +91,15 @@ func runInstance(args []string, cat *catalog.Catalog) error {
 	if err != nil {
 		return err
 	}
+	if len(spec.Images) > 0 {
+		// The controller's data is fresher than the binary's. A bad one only
+		// costs that: the built-in data is used and the log says so.
+		if sent, err := runnerimages.ParseSnapshot(spec.Images); err != nil {
+			fmt.Fprintf(os.Stderr, "raccoonci: the runner-images data sent with the job is unusable (%v); using the built-in data\n", err)
+		} else {
+			images = sent
+		}
+	}
 	github := obj("github")
 	repository, _ := github.Get("repository")
 	repoName, _ := repository.(string)
