@@ -238,7 +238,8 @@ Node.js、Go、Python、Java、Rust、apt 包已经通了（见 B.1 和下面的
 - ⬜ secrets / vars 的加密存储
 - ⬜ 凭证和机密放数据库（服务端版本）：现在缓存桶的密钥只从环境变量读（`cmd/raccoonci/cachestore.go` 是唯一读环境变量的地方，`blob.S3Config` 已经是"一个桶的配置"，服务端按组织/仓库从库里取出后 `blob.NewS3` 即可，缓存服务不用改）；workflow 的 `-secret` 也是本地环境变量。服务端要做：信封加密入库（主密钥来自 KMS 或服务启动配置，读出后只在内存用，日志和 API 响应里不出现）；按组织/仓库隔离，不同租户不同桶或不同前缀；能用短期凭证（STS）就不存长期密钥，并支持轮换；机器永远拿不到桶密钥，只拿预签名链接；workflow 机密只在派发任务时解密，并和"InstaBox Org Secret 占位符代理换头"一起设计，让机器上根本没有真值
 - ✅ 注册 GitHub App 前的补丁（2026-11-02，**未提交**）：用 App 时，手动启动（`POST /v1/runs`）和重跑的 run 没有 installation id，取源码和报状态都会失败。现在 `intake.Handler.Dispatch/Rerun` 先在已存的事件里找这个仓库最近的 installation id，找不到就用 App 的 JWT 问 GitHub（`github.App.InstallationOf`，`GET /repos/{repo}/installation`）；App 没装在这个仓库上回 404 "the GitHub App is not installed on …"；事件里记下这个 id，执行器因此读得到。用令牌时不需要，仍是 0。单测：intake 2 个、github 1 个（含"500 不会被当成没装"）。**没在真 GitHub 上测**（App 还没注册）
-- 🟡 工作目录清理（2026-11-02，**未提交**）：服务启动时（在把中断的 run 重新排队之后）清空执行器的 `work/`、本机 runner 的 `jobs/`，以及 artifact 和 cache 两个上传暂存目录（`artifacts/spool`、`caches/cache-spool`）：崩溃时没来得及删的残留。前提是一个数据目录只有一个服务在用（第一版就是单实例）。正常结束的 run 本来就会删自己的目录。单测 4 个（执行器+本机 runner、两个暂存目录）。没做：磁盘配额（运行中的 run 的源码包和暂存可以把盘写满）；没有在真机上看到崩溃后清理（只有单测）
+- 🟡 工作目录清理（2026-11-02，**未提交**）：服务启动时（在把中断的 run 重新排队之后）清空执行器的 `work/`、本机 runner 的 `jobs/`，以及 artifact 和 cache 两个上传暂存目录（`artifacts/spool`、`caches/cache-spool`）：崩溃时没来得及删的残留。前提是一个数据目录只有一个服务在用（第一版就是单实例）。正常结束的 run 本来就会删自己的目录。单测 4 个（执行器+本机 runner、两个暂存目录）。没有在真机上看到崩溃后清理（只有单测）
+- 🟡 磁盘保护（2026-11-02，**未提交**）：①数据目录所在的盘剩余空间低于 `-min-free-mb`（默认 1024，0 不检查）时，执行器不再领新的 run，留在队列里，日志警告一次，空间回来后自动继续；②一个 run 的源码包超过 `-max-source-mb`（默认 2048）就让这个 run 失败，日志写明超限，工作目录不留残渣（`cappedWriter` 在写入时截断，不是下载完再量）。单测 2 个（盘满时 run 保持排队、空间回来后跑完；超大源码失败且无残留）。**没做**：真正的配额（按仓库或组织限制总占用）；运行中的 run 里 artifact/cache 上传暂存仍只靠各自的上限和 cache 的 `Free` 检查，artifact 服务没有剩余空间检查；没有在真机上把盘写满看过（只有注入的 `Free`）
 - ⬜ 服务端定期轮询 runner-images（ETag + 存库），目前只有命令行手动更新
 - ⬜ 来自 fork PR 的 workflow 的 secrets 策略
 - ⬜ catalog feed：默认地址（还没发布，**不能编一个**）、签名生成流程和工具
