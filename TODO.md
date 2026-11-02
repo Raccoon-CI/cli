@@ -240,8 +240,8 @@ Node.js、Go、Python、Java、Rust、apt 包已经通了（见 B.1 和下面的
 - ✅ 注册 GitHub App 前的补丁（2026-11-02，**未提交**）：用 App 时，手动启动（`POST /v1/runs`）和重跑的 run 没有 installation id，取源码和报状态都会失败。现在 `intake.Handler.Dispatch/Rerun` 先在已存的事件里找这个仓库最近的 installation id，找不到就用 App 的 JWT 问 GitHub（`github.App.InstallationOf`，`GET /repos/{repo}/installation`）；App 没装在这个仓库上回 404 "the GitHub App is not installed on …"；事件里记下这个 id，执行器因此读得到。用令牌时不需要，仍是 0。单测：intake 2 个、github 1 个（含"500 不会被当成没装"）。**没在真 GitHub 上测**（App 还没注册）
 - 🟡 工作目录清理（2026-11-02，**未提交**）：服务启动时（在把中断的 run 重新排队之后）清空执行器的 `work/`、本机 runner 的 `jobs/`，以及 artifact 和 cache 两个上传暂存目录（`artifacts/spool`、`caches/cache-spool`）：崩溃时没来得及删的残留。前提是一个数据目录只有一个服务在用（第一版就是单实例）。正常结束的 run 本来就会删自己的目录。单测 4 个（执行器+本机 runner、两个暂存目录）。没有在真机上看到崩溃后清理（只有单测）
 - 🟡 磁盘保护（2026-11-02，**未提交**）：①数据目录所在的盘剩余空间低于 `-min-free-mb`（默认 1024，0 不检查）时，执行器不再领新的 run，留在队列里，日志警告一次，空间回来后自动继续；②一个 run 的源码包超过 `-max-source-mb`（默认 2048）就让这个 run 失败，日志写明超限，工作目录不留残渣（`cappedWriter` 在写入时截断，不是下载完再量）。单测 2 个（盘满时 run 保持排队、空间回来后跑完；超大源码失败且无残留）。**没做**：真正的配额（按仓库或组织限制总占用）；运行中的 run 里 artifact/cache 上传暂存仍只靠各自的上限和 cache 的 `Free` 检查，artifact 服务没有剩余空间检查；没有在真机上把盘写满看过（只有注入的 `Free`）
-- ⬜ 服务端定期轮询 runner-images（ETag + 存库），目前只有命令行手动更新
-- ⬜ 来自 fork PR 的 workflow 的 secrets 策略
+- 🟡 服务端定期轮询 runner-images（2026-11-02，**未提交**）：`internal/server/imagesync` 启动时和每 `-runner-images-interval`（默认 6 小时，0 不轮询）按 catalog 里的镜像读 `runnerimages.Fetcher`（徽章，不需要令牌），存进新表 `documents`（迁移 0008，`Store.PutDocument/GetDocument`，整份替换）；`Syncer.Snapshot` 是内置快照盖上轮询到的数据（从不比内置的少；读库失败时仍给内置的并记警告），执行器每个 run 用它（`Executor.Images`）。读不到的镜像保留上次的好数据；别名指向没跟踪的镜像时拒绝；存的文档损坏时被下次轮询覆盖。单测：syncer 4 个、store 1 个、执行器 1 个。**限制**：目前只有控制端（服务端）的规划用它；机器上的 `run-instance` 仍用二进制里内置的快照，所以机器上装什么、用哪个默认版本不受影响，要让机器也用得先把快照随任务发过去（没做）；没用 ETag（徽章和报告的请求量很小）；没在真网络上跑过（只有假数据源，命令行的 `runner-images update` 走的是同一个 `Fetcher`）
+- ✅ 来自 fork PR 的 workflow 的 secrets 策略：fork 的 PR 一个密钥也拿不到、日志里写明，变量照给（第 5 步，真正的 `run-instance` 测过）；`pull_request_target` 的策略没单独做
 - ⬜ catalog feed：默认地址（还没发布，**不能编一个**）、签名生成流程和工具
 - 依赖这里的 B 项：OIDC 和真实 `GITHUB_TOKEN`（B.3 未决项）、artifact/cache 的持久化与按分支隔离（B.3 搁置项）、内容哈希的按需执行（B.6 ③）、完整的 `github` 上下文（B.5）
 
