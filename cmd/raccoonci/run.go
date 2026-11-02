@@ -27,6 +27,7 @@ import (
 	"raccoonci/internal/blob"
 	"raccoonci/internal/cache"
 	"raccoonci/internal/catalog"
+	"raccoonci/internal/cliflag"
 	"raccoonci/internal/dispatch"
 	"raccoonci/internal/engine"
 	"raccoonci/internal/envsnap"
@@ -34,6 +35,7 @@ import (
 	"raccoonci/internal/local"
 	"raccoonci/internal/provision"
 	"raccoonci/internal/runner"
+	"raccoonci/internal/runnercmd"
 	"raccoonci/internal/runnerimages"
 	"raccoonci/internal/sched"
 	"raccoonci/internal/trigger"
@@ -41,18 +43,13 @@ import (
 	"raccoonci/internal/workflow"
 )
 
-type listFlag []string
-
-func (l *listFlag) String() string     { return strings.Join(*l, ",") }
-func (l *listFlag) Set(s string) error { *l = append(*l, s); return nil }
-
 // runWorkflow implements `raccoonci run`. ok is false when the run failed. With
 // remote set (`-on instabox`), the job graph is still resolved here but every
 // job instance runs on a machine of its own.
 func runWorkflow(args []string, cat *catalog.Catalog, remote *remoteFlags) (ok bool, err error) {
 	processStart := time.Now()
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
-	var jobs, secrets, vars, inputs listFlag
+	var jobs, secrets, vars, inputs cliflag.List
 	fs.Var(&jobs, "job", "run only this job and the jobs it needs (repeatable)")
 	fs.Var(&secrets, "secret", "pass the environment variable `NAME` as secrets.NAME (repeatable; GITHUB_TOKEN is passed when set)")
 	fs.Var(&vars, "var", "set vars.`NAME=VALUE` (repeatable)")
@@ -151,7 +148,7 @@ func runWorkflow(args []string, cat *catalog.Catalog, remote *remoteFlags) (ok b
 	if remote != nil {
 		// The machines install what their jobs need; nothing is installed here.
 		installHere = "none"
-		if err := validInstall(*install); err != nil {
+		if err := runnercmd.ValidInstall(*install); err != nil {
 			return false, err
 		}
 		if apiKey, err = remote.check(); err != nil {
@@ -161,12 +158,12 @@ func runWorkflow(args []string, cat *catalog.Catalog, remote *remoteFlags) (ok b
 			*parallel = 8
 		}
 	}
-	rt, err := newRunEnv(cat, installHere)
+	rt, err := runnercmd.NewRunEnv(cat, installHere)
 	if err != nil {
 		return false, err
 	}
 	if installHere != "none" {
-		removed, perr := provision.Prune(rt.toolCache, int64(*toolCacheLimitGB)<<30, 24*time.Hour, time.Now())
+		removed, perr := provision.Prune(rt.ToolCache, int64(*toolCacheLimitGB)<<30, 24*time.Hour, time.Now())
 		if perr != nil {
 			fmt.Fprintf(os.Stderr, "raccoonci: tool cache cleanup: %v\n", perr)
 		}
@@ -174,7 +171,7 @@ func runWorkflow(args []string, cat *catalog.Catalog, remote *remoteFlags) (ok b
 			fmt.Fprintf(os.Stderr, "raccoonci: tool cache is over %d GiB; removed %s\n", *toolCacheLimitGB, strings.Join(removed, ", "))
 		}
 	}
-	cache := rt.cacheDir
+	cache := rt.CacheDir
 	if *workDir == "" {
 		*workDir = filepath.Join(cache, "runs", time.Now().Format("20060102-150405"))
 	}
@@ -274,10 +271,10 @@ func runWorkflow(args []string, cat *catalog.Catalog, remote *remoteFlags) (ok b
 	if rel, err := filepath.Rel(repo, absPath(path)); err == nil && !strings.HasPrefix(rel, "..") {
 		wfID = filepath.ToSlash(rel)
 	}
-	if rt.prov != nil && remote == nil {
+	if rt.Prov != nil && remote == nil {
 		// Only a local run provisions here; a machine of -on instabox has
 		// its own run-instance and is deleted afterwards.
-		if missingStore, err = missing.Open(filepath.Join(rt.cacheDir, "missing", repoDirName(repository.(string))+".json")); err != nil {
+		if missingStore, err = missing.Open(filepath.Join(rt.CacheDir, "missing", repoDirName(repository.(string))+".json")); err != nil {
 			fmt.Fprintf(os.Stderr, "raccoonci: remembering missing commands is off: %v\n", err)
 			missingStore = nil
 		}
@@ -308,7 +305,7 @@ func runWorkflow(args []string, cat *catalog.Catalog, remote *remoteFlags) (ok b
 		Inputs:      inputObj,
 		Images:      images,
 		Catalog:     cat,
-		Provision:   rt.prov,
+		Provision:   rt.Prov,
 		Missing:     missingStore,
 		WorkflowID:  wfID,
 		Repo:        repoDir.FS(),
@@ -316,13 +313,13 @@ func runWorkflow(args []string, cat *catalog.Catalog, remote *remoteFlags) (ok b
 		Jobs:        jobs,
 		MaxParallel: *parallel,
 		Runner: runner.Config{
-			ToolCache: rt.toolCache,
+			ToolCache: rt.ToolCache,
 			Actions:   actions.NewStore(filepath.Join(*workDir, "_actions"), secretValues["GITHUB_TOKEN"]),
-			Node:      rt.node.Binary,
-			NodeMusl:  rt.nodeMusl.Binary,
+			Node:      rt.Node.Binary,
+			NodeMusl:  rt.NodeMusl.Binary,
 			// Container jobs reach the Node.js runtimes and the downloaded
 			// actions at the same paths as the host.
-			Mounts:            []string{rt.node.Dir, filepath.Join(*workDir, "_actions")},
+			Mounts:            []string{rt.Node.Dir, filepath.Join(*workDir, "_actions")},
 			Checkout:          local.Checkout(repo, repository.(string)),
 			ServiceEnv:        svc.env,
 			ContainerServices: svc.serveNetwork,

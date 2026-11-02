@@ -29,6 +29,7 @@ make runner-images        # refresh the embedded snapshot of GitHub's Ubuntu run
 
 - `cmd/<binary>/main.go`: one directory per executable. Keep `main` thin: parse flags, wire dependencies, call into `internal/`.
 - `internal/<pkg>/`: all application logic goes here (not importable from outside the module).
+- `cmd/raccoonci-runner` is the machine side of `raccoonci` (`agent`, `run-instance`, `runner-snapshot`, `-version`; built-in catalog only). `cmd/raccoonci` still offers the same commands; both call `internal/runnercmd`, which holds the machine-side commands (`Agent`, `RunInstance`, `Snapshot`, `RunEnv`). `run` (the local engine) is still only in `raccoonci`, so existing runner snapshots keep installing `raccoonci` (TODO D.3 S5, D.5 decision 8). Flag types shared by commands live in `internal/cliflag`.
 - `version` lives in `package main` and is set through `-ldflags "-X main.version=..."` in the Makefile.
 
 New binaries also need to be added to the `build` target in the Makefile.

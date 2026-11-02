@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"raccoonci/internal/cliflag"
 	"raccoonci/internal/dispatch"
 	"raccoonci/internal/ghrunner"
 	"raccoonci/internal/instabox"
@@ -25,10 +26,10 @@ import (
 // the machine's template carries. GitHub keeps orchestrating the workflow.
 func serve(args []string) error {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
-	var repos listFlag
+	var repos cliflag.List
 	fs.Var(&repos, "repo", "a repository to watch, owner/name (repeatable)")
 	org := fs.String("org", "", "register the runners with this organization instead of with a repository each, so one pool of waiting runners serves all the repositories watched (all of the organization's when no -repo is given); needs a token that may manage the organization's runners")
-	var isolate listFlag
+	var isolate cliflag.List
 	fs.Var(&isolate, "isolate", "with -org: a repository (owner/name) that gets runners of its own instead of the organization's shared pool, because it does not trust the others (repeatable). Public repositories are isolated automatically")
 	prefix := fs.String("label-prefix", "raccoon-", "serve the jobs whose runs-on has a label starting with this")
 	poll := fs.Duration("poll", time.Second, "how often each repository is asked for waiting jobs")
