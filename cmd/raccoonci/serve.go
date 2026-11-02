@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -27,6 +28,8 @@ func serve(args []string) error {
 	var repos listFlag
 	fs.Var(&repos, "repo", "a repository to watch, owner/name (repeatable)")
 	org := fs.String("org", "", "register the runners with this organization instead of with a repository each, so one pool of waiting runners serves all the repositories watched (all of the organization's when no -repo is given); needs a token that may manage the organization's runners")
+	var isolate listFlag
+	fs.Var(&isolate, "isolate", "with -org: a repository (owner/name) that gets runners of its own instead of the organization's shared pool, because it does not trust the others (repeatable). Public repositories are isolated automatically")
 	prefix := fs.String("label-prefix", "raccoon-", "serve the jobs whose runs-on has a label starting with this")
 	poll := fs.Duration("poll", time.Second, "how often each repository is asked for waiting jobs")
 	runnerLabel := fs.String("runner-label", "", "the label, and so the size (raccoon-2vcpu is 2 vCPUs), of the runners kept waiting for jobs; only jobs with this label (and no other but self-hosted) are taken by them, other sizes get a machine each. Default: <label-prefix>4vcpu")
@@ -68,6 +71,33 @@ func serve(args []string) error {
 			}
 		}
 	}
+	var isolated []string
+	if *org != "" {
+		for _, r := range isolate {
+			if !slices.Contains(repos, r) {
+				return fmt.Errorf("-isolate %s is not among the repositories watched", r)
+			}
+		}
+		isolated = append(isolated, isolate...)
+		for _, r := range repos {
+			if slices.Contains(isolated, r) {
+				continue
+			}
+			// A failed lookup must not put a public repository in the shared pool.
+			pub, err := gh.IsPublic(context.Background(), r)
+			if err != nil {
+				return fmt.Errorf("reading the visibility of %s: %w", r, err)
+			}
+			if pub {
+				isolated = append(isolated, r)
+			}
+		}
+		if len(isolated) > 0 {
+			fmt.Fprintf(os.Stderr, "runners of their own (not the organization's shared pool): %s\n", strings.Join(isolated, ", "))
+		}
+	} else if len(isolate) > 0 {
+		return errors.New("-isolate needs -org (without it every repository has a pool of its own)")
+	}
 	key := cmp.Or(os.Getenv("INSTABOX_API_KEY"), os.Getenv("IBX_API_KEY"))
 	if key == "" {
 		return errors.New("serve needs INSTABOX_API_KEY (or IBX_API_KEY) in the environment")
@@ -102,6 +132,7 @@ func serve(args []string) error {
 		P:               p,
 		Repos:           repos,
 		Org:             *org,
+		Isolated:        isolated,
 		StartsPerMinute: *startsPerMinute,
 		LabelPrefix:     *prefix,
 		RunnerLabel:     *runnerLabel,

@@ -325,6 +325,19 @@ func (c *Client) OrgRepos(ctx context.Context, org string) ([]string, error) {
 	return out, nil
 }
 
+// IsPublic reports whether a repository is public. Internal and private
+// repositories are not.
+func (c *Client) IsPublic(ctx context.Context, repo string) (bool, error) {
+	var r struct {
+		Private    bool   `json:"private"`
+		Visibility string `json:"visibility"`
+	}
+	if err := c.do(ctx, "GET", "/repos/"+repo, nil, &r); err != nil {
+		return false, err
+	}
+	return !r.Private && r.Visibility != "private" && r.Visibility != "internal", nil
+}
+
 // HasLabelPrefix reports whether the job asks for one of our labels.
 func (j Job) HasLabelPrefix(prefix string) bool {
 	for _, l := range j.Labels {

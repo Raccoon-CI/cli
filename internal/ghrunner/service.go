@@ -39,6 +39,12 @@ type Service struct {
 	// one pool serves them all and keeps fewer machines idle than a pool each.
 	// The organization's default runner group must be open to the repositories.
 	Org string
+	// Isolated lists repositories (owner/name) that do not share the
+	// organization's pool: each gets runners registered with the repository
+	// itself, which take that repository's jobs only. Use it for public
+	// repositories (anyone can open a pull request that runs code on the runner)
+	// and for repositories that do not trust the others. Ignored without Org.
+	Isolated []string
 	// LabelPrefix selects the jobs: those with a runs-on label starting with it
 	// (compared lower-case). Default "raccoon-".
 	LabelPrefix string
@@ -142,9 +148,9 @@ func (s *Service) logf(format string, args ...any) {
 }
 
 // poolOf names the pool of runners that serve repo: the repository itself, or
-// the organization when runners are shared.
+// the organization when runners are shared. An isolated repository never shares.
 func (s *Service) poolOf(repo string) string {
-	if s.Org != "" {
+	if s.Org != "" && !slices.Contains(s.Isolated, repo) {
 		return OrgScope + s.Org
 	}
 	return repo
@@ -189,18 +195,22 @@ func (s *Service) Run(ctx context.Context) error {
 		wake  chan struct{}
 	}
 	var loops []loop
-	if s.Org != "" {
-		ch := make(chan struct{}, 1)
-		for _, r := range s.Repos {
-			s.wake[r] = ch
-		}
-		loops = append(loops, loop{s.Repos, ch}) // one pool: one loop, so its idle runners are counted once
-	} else {
-		for _, r := range s.Repos {
-			ch := make(chan struct{}, 1)
+	var shared []string
+	for _, r := range s.Repos {
+		if s.poolOf(r) == r {
+			ch := make(chan struct{}, 1) // a pool of its own
 			s.wake[r] = ch
 			loops = append(loops, loop{[]string{r}, ch})
+		} else {
+			shared = append(shared, r)
 		}
+	}
+	if len(shared) > 0 {
+		ch := make(chan struct{}, 1)
+		for _, r := range shared {
+			s.wake[r] = ch
+		}
+		loops = append(loops, loop{shared, ch}) // one pool: one loop, so its idle runners are counted once
 	}
 	s.runCtx = ctx
 	s.mu.Unlock()

@@ -467,6 +467,56 @@ func TestRunnersAreRegisteredWithTheOrganization(t *testing.T) {
 	}
 }
 
+// An isolated repository of an organization does not use the organization's
+// pool: its runner is registered with the repository.
+func TestIsolatedRepositoryHasItsOwnPool(t *testing.T) {
+	gh := &fakeGitHub{runners: map[int64]int{}, jobs: []Job{
+		{ID: 62, RunID: 7, Name: "build", Status: "queued", Labels: []string{"raccoon-4vcpu"}, CreatedAt: time.Now()},
+	}}
+	var mu sync.Mutex
+	var paths []string
+	ghSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		paths = append(paths, r.Method+" "+r.URL.Path)
+		mu.Unlock()
+		gh.ServeHTTP(w, r)
+	}))
+	defer ghSrv.Close()
+	ib := &fakeInstaBox{machines: map[string]bool{}, files: map[string]string{}}
+	ibSrv := httptest.NewServer(ib)
+	defer ibSrv.Close()
+	s := newService(t, ghSrv.URL, ib, ibSrv.URL)
+	s.Org = "o"
+	s.Isolated = []string{"o/r"}
+	if got := s.poolOf("o/r"); got != "o/r" {
+		t.Fatalf("poolOf(isolated) = %q", got)
+	}
+	if got := s.poolOf("o/other"); got != OrgScope+"o" {
+		t.Fatalf("poolOf(other) = %q", got)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { s.Run(ctx); close(done) }()
+	deadline := time.Now().Add(15 * time.Second)
+	for ib.deletes.Load() < 1 && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	cancel()
+	<-done
+	if ib.deletes.Load() < 1 {
+		t.Fatal("the job was not served")
+	}
+	mu.Lock()
+	text := strings.Join(paths, "\n")
+	mu.Unlock()
+	if !strings.Contains(text, "POST /repos/o/r/actions/runners/generate-jitconfig") {
+		t.Errorf("the runner was not registered with the repository:\n%s", text)
+	}
+	if strings.Contains(text, "/orgs/o/") {
+		t.Errorf("a runner was registered with the organization:\n%s", text)
+	}
+}
+
 // A job queued, a runner started for it, and then another runner (one that was
 // waiting) takes the job: the runner started for it is released at once, not
 // after the idle timeout.
