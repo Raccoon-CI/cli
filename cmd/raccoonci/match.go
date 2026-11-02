@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"raccoonci/internal/cliflag"
 	"raccoonci/internal/trigger"
 	"raccoonci/internal/workflow"
 )
@@ -18,7 +19,7 @@ import (
 // last commit.
 type eventFlags struct {
 	name, action, ref, baseRef, before, cron string
-	files                                    listFlag
+	files                                    cliflag.List
 }
 
 func (f *eventFlags) register(fs *flag.FlagSet, withEventName bool) {
