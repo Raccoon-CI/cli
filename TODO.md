@@ -397,7 +397,7 @@ Node.js、Go、Python、Java、Rust、apt 包已经通了（见 B.1 和下面的
 ## D.8 许可证：Apache-2.0（用户 2026-11-02 定）
 
 - ✅ 仓库根目录有 `LICENSE`：标准 Apache-2.0 全文，与发行版自带的 `/usr/share/common-licenses/Apache-2.0` **逐字节相同**（`cmp` 和 sha256 核对过，11358 字节、202 行）。镜像（`deploy/Dockerfile`）加了标准标签 `org.opencontainers.image.licenses="Apache-2.0"`（`docker build --check` 通过）。
-- ⏸ **版权人和年份：等用户确认再填**。`LICENSE` 附录里是标准的占位 `Copyright [yyyy] [name of copyright owner]`，原样没动，我不编名字。Apache-2.0 并不要求把它填进 `LICENSE` 文件本身——它只是"怎么把许可证用到你的作品上"的示范——真正要写版权人的地方是：①各文件头的版权声明（可选，Apache 建议但不强制）、②`NOTICE` 文件（只在有需要保留的署名声明时才需要，现在没有，所以没建）。用户给出版权人（个人还是组织、写哪个名字）和起始年份后再决定写哪些地方。
+- ✅ **版权人和年份（2026-11-02 用户定了，"折中方案"）**：`LICENSE` 附录填 `Copyright 2026 Steven Zhao`，只改了这一行。用户只说了填附录，所以**没加**文件头和 `NOTICE`（下一条）；若"折中方案"还包括别的（例如只给入口文件加头），等用户说明。以下是之前的分析：Apache-2.0 并不要求把它填进 `LICENSE` 文件本身——它只是"怎么把许可证用到你的作品上"的示范——真正要写版权人的地方是：①各文件头的版权声明（可选，Apache 建议但不强制）、②`NOTICE` 文件（只在有需要保留的署名声明时才需要，现在没有，所以没建）。用户给出版权人（个人还是组织、写哪个名字）和起始年份后再决定写哪些地方。
 - 没加文件头：几百个文件逐个加会很吵，也没法替用户决定版权人；等上一条定了再说。
 - **依赖的许可证核对**（从 `go list -m all` 的模块缓存里读 `LICENSE`，粗分类）：Apache-2.0 14 个、BSD 24 个、MIT 4 个，没有 GPL/AGPL/LGPL。例外：①`github.com/hashicorp/golang-lru/v2` 是 **MPL-2.0**（文件级 copyleft），经 `modernc.org/sqlite` 进入服务端二进制；未修改地使用，与 Apache-2.0 兼容，不要求我们的代码也用 MPL，但**发布二进制或镜像时要附带第三方许可证声明**（见下）；②`github.com/kr/pretty`、`kr/text` 的模块里没有 LICENSE 文件，但它们不在本仓库任何二进制或测试的构建里（只在别的模块的测试依赖图里），所以不影响。
 - **还要做**：①发第一个版本前生成第三方许可证声明（`THIRD_PARTY_NOTICES`，把依赖的版权声明和许可证文本汇总；工具如 `go-licenses`，这台机器没装，且要联网装，没做）；②拆仓库时每个仓库放一份同样的 `LICENSE`；③`docs/gha-compat.md` 里说 act、Gitea 的代码可以"带署名地引用或复用"：我们目前只是参考没有拷贝代码，若以后拷贝，要保留它们的版权声明（MIT 要求），并写进 `NOTICE`。
