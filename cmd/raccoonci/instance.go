@@ -132,6 +132,6 @@ func runInstance(args []string, cat *catalog.Catalog) error {
 	if err != nil {
 		return err
 	}
-	enc.Write(wireLine{Result: &wireResult{Conclusion: res.Conclusion, Outputs: outputs, DurationMS: time.Since(began).Milliseconds()}})
+	enc.Write(wireLine{Result: &wireResult{Conclusion: res.Conclusion, Outputs: outputs, DurationMS: time.Since(began).Milliseconds(), Summary: res.Summary}})
 	return nil
 }
