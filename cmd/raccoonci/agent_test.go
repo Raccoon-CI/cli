@@ -17,6 +17,7 @@ import (
 
 	"raccoonci/internal/dispatch"
 	"raccoonci/internal/runner"
+	"raccoonci/internal/wire"
 )
 
 type lockedBuf struct {
@@ -128,6 +129,30 @@ jobs:
 	mu.Unlock()
 	if !slices.Contains(lines, "hello from 2 token=***") { // the secret arrived, masked
 		t.Errorf("step output did not arrive as events: %q", lines)
+	}
+}
+
+// A machine whose snapshot is older than its controller must say so instead of
+// running an assignment whose fields it may read differently. (An assignment
+// without a version, as every controller sent before there was one, is the
+// case TestRunInstanceOverTheWire covers.)
+func TestRunInstanceRefusesAnAssignmentNewerThanItUnderstands(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds the binary")
+	}
+	bin := filepath.Join(t.TempDir(), "raccoonci")
+	if out, err := exec.Command("go", "build", "-o", bin, ".").CombinedOutput(); err != nil {
+		t.Fatalf("go build: %v\n%s", err, out)
+	}
+	spec, _ := json.Marshal(instanceSpec{Protocol: wire.Version + 1, Workflow: ".github/workflows/w.yml", Job: "test",
+		Contexts: json.RawMessage(`{}`), Install: "none"})
+	cmd := exec.Command(bin, "run-instance")
+	cmd.Stdin = bytes.NewReader(spec)
+	home := t.TempDir()
+	cmd.Env = append(os.Environ(), "HOME="+home, "XDG_CACHE_HOME="+home)
+	out, err := cmd.CombinedOutput()
+	if err == nil || !strings.Contains(string(out), "assignment of version 2") || !strings.Contains(string(out), "must be rebuilt") {
+		t.Fatalf("err = %v, output:\n%s", err, out)
 	}
 }
 

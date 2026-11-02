@@ -45,6 +45,9 @@ func runInstance(args []string, cat *catalog.Catalog) error {
 	if err := json.NewDecoder(io.LimitReader(os.Stdin, 64<<20)).Decode(&spec); err != nil {
 		return fmt.Errorf("reading the instance: %w", err)
 	}
+	if spec.Protocol > wire.Version {
+		return fmt.Errorf("the controller sent an assignment of version %d; this raccoonci understands up to %d: the machine's snapshot is older than the controller and must be rebuilt (raccoonci runner-snapshot)", spec.Protocol, wire.Version)
+	}
 	ctxv, err := value.FromJSON(spec.Contexts)
 	if err != nil {
 		return fmt.Errorf("contexts: %w", err)

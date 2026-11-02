@@ -26,6 +26,7 @@ import (
 	"raccoonci/internal/runner"
 	"raccoonci/internal/sched"
 	"raccoonci/internal/value"
+	"raccoonci/internal/wire"
 )
 
 // remoteFlags are the `run` flags that choose where it runs. They are taken
@@ -278,7 +279,7 @@ func (rr *remoteRun) run(ctx context.Context, inst engine.RemoteInstance) (runne
 	if err != nil {
 		return runner.Result{}, err
 	}
-	input, err := json.Marshal(instanceSpec{Workflow: rr.workflow, Job: inst.Job.ID, Contexts: contexts,
+	input, err := json.Marshal(instanceSpec{Protocol: wire.Version, Workflow: rr.workflow, Job: inst.Job.ID, Contexts: contexts,
 		ServiceEnv: svcEnv, Install: rr.install})
 	if err != nil {
 		return runner.Result{}, err
