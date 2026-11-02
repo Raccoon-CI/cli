@@ -330,6 +330,7 @@ Node.js、Go、Python、Java、Rust、apt 包已经通了（见 B.1 和下面的
 5. **前端技术栈**，以及它是否也要由 backend 静态托管。
 6. **`internal` → 公开 API 的边界**（S4）：哪些包承诺稳定。建议只承诺 `value`、`workflow`、`expr`、`trigger`、`catalog` 的数据结构和 `wire`/`dispatch` 协议，其余仍写明"不稳定"。
 7. **开发环境**：隧道（`ci.example.com`）、开发 App、InstaBox runner 快照现在都为这一个仓库配的；拆后每个仓库的测试用什么配置（我建议集成测试都用环境变量开关，和现在的 `TestReal*` 一样，默认跳过）。
+8. **cli 和 runner 的界线**（D.7.4）：本机 `raccoonci run` 放 runner 仓库的二进制里（建议），还是 cli 仓库？
 
 ## D.6 C.1 补齐后还剩什么（拆分不用等它们，但要带着）
 
@@ -339,3 +340,38 @@ Node.js、Go、Python、Java、Rust、apt 包已经通了（见 B.1 和下面的
 - 按仓库/组织的用量额度（要先有按仓库累计的机器用量入库）。
 - 没有云厂商接受过我们签的 OIDC token。
 - 前端。
+
+## D.7 S4 的依据：谁真的用了哪些导出名（2026-11-02，实测，不动代码）
+
+方法：写了一个小的 AST 统计工具（会话临时目录里，没入库；约 150 行，数每个 `internal/<包>` 的导出名，并按"将来属于哪个仓库"数每个名字被包外的哪些仓库用到；`cmd/raccoonci` 按文件名分：`agent.go`、`instance.go`、`runenv.go`、`runnersnap.go` 算 runner，其余算 cli；不含测试文件）。**注意它的局限**：①方法不计入（只数 `pkg.Name`）；②一个类型只出现在别的函数的签名里（调用者不写它的名字）会被算成"包外没用"，其实不能取消导出（例如 `plan.Plan`、`affected.Decision`、`workflow.Strategy`）；所以"没用"只是**候选**，要逐个看。
+
+### D.7.1 对 D.2 的修正（按真实使用）
+
+| 包 | D.2 里放在 | 实测谁用 | 改成 |
+|---|---|---|---|
+| `semver` | 库 | 只有 `provision`（runner） | **runner** |
+| `affected` | 库 | 只有 cli（`cmd/raccoonci` 的 `affected`/`run -affected`、`envsnap`），backend 没用 | **cli** |
+| `envsnap` | 库 | 只有 cli（`run -on instabox -env-snapshots`） | **cli** |
+| `plan` | 库 | 只有 cli（`plan` 命令）；它又用 `scan`、`actions`（runner） | **cli**（所以 cli 依赖 runner 仓库） |
+| `sched` | 库 | cli 和 `ghrunner`，backend 没用 | **cli** |
+| `local` | runner | cli（`run`）和 runner（`instance.go` 的 checkout）都用 | 留 **runner**，cli 依赖它 |
+| `azblob`、`twirp` | 库 | 只有库里的 `artifact`/`cache` 用 | 留在库里但**不公开**（库的内部包） |
+| `cache`、`artifact`、`blob`、`cron`、`instabox`、`dispatch`、`wire`、`trigger`、`catalog`、`runnerimages`、`archive`、`platform`、`runevent`、`value`、`expr`、`workflow` | 库 | 至少两个仓库用 | 库，**公开**（见 D.7.2） |
+
+依赖方向因此是：**库 ← runner ← cli**，**库 ← backend**；backend 不能依赖 runner。现在 backend 通过 `engine` 和 `runner` 间接依赖 runner，这正是 S1 要切断的。
+
+### D.7.2 库里要公开的包，和包外真正用到的名字数
+
+`value`（8 个导出，8 个被用）、`expr`（12/11）、`workflow`（9/7，没人用：`MaxMatrixJobs`、`Strategy`）、`trigger`（6/5）、`catalog`（**37/16**：21 个包外没用，多是 `*Def`/`*Rule` 这类类型，在 `Catalog` 的字段里，需要保留）、`runnerimages`（7/5）、`runevent`（19/19）、`wire`（7/6）、`dispatch`（11/6：`ProtocolVersion` 等只在包内）、`instabox`（22/12：10 个包外没用，`CreateRequest`/`MachineInfo`/`Operation` 是 API 载荷类型）、`blob`（16/13）、`artifact`（10/9）、`cache`（5/5）、`cron`（2/2）、`platform`（2/2）、`archive`（2/2）。结论：**表面积不大**，库的公开 API 合计约 190 个导出名，其中 `catalog` 和 `instabox` 最值得在公开前瘦身（把只是数据载荷的类型留着，把纯内部的函数改成小写）。
+
+### D.7.3 S1 的目标接口很小（backend 到底用了 engine 和 runner 的什么）
+
+- backend 用 `engine` 的**只有三个名字**：`Run`、`Options`、`RemoteInstance`。`Options` 里它设的字段：`Remote`、`Github`、`Vars`、`Inputs`、`Images`、`Catalog`、`WorkDir`、`MaxParallel`、`Runner`（只用 `OnEvent`）。所以进库的"作业图"只需要提供这三个名字，`Options.Runner` 换成一个 `OnEvent func(runevent.Event)` 就不再需要 `runner.Config`。
+- backend 用 `runner` 的：事件类型和结论常量（已经是 `runevent` 的别名，**可以机械地改成 `runevent.X`**，约 80 处，我没做是因为只能逐处编辑），以及 `runner.Config`（上面说的）。
+- runner 一侧只用 `dispatch.Agent`、`dispatch.SlotConfig`、`engine.RunInstance`、`engine.Options`、`instabox.RunnerSpec`（制作快照）。
+- 这三点合起来说明 S1 比 D.3 里担心的要窄：**backend 只依赖一个很小的"作业图 + 远程实例"接口**。
+
+### D.7.4 这次发现、要你定的
+
+- **cli 和 runner 的界线**：cli 的 `run`（本机引擎）、`plan` 都要用 runner 仓库的 `engine`、`runner`、`scan`、`provision`、`actions`、`local`、`missing`，也就是说 cli 实际依赖 runner 的大半，runner 仓库里这些包也得公开。**建议**：本机 `raccoonci run` 属于 runner 仓库的二进制（"能执行 workflow 的那个程序"），cli 仓库做面向平台的命令（对 backend 的 API 说话：看 run、日志、触发，外加 `plan`/`match`/`affected`/`catalog`/`serve`）。这样 cli 对 runner 只剩 `plan`（用 `scan`），依赖更清楚。备选：保持现在的"一个 `raccoonci` 命令全都有"，只是放在两个仓库里实现。写进了 D.5 的问题 8。
+- 统计工具本身：想入库的话建议放 `tools/apiscan`，拆分前后都能用来检查"有没有越界依赖"。
