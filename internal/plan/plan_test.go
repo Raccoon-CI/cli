@@ -3,7 +3,7 @@ package plan
 import (
 	"testing"
 
-	"github.com/Raccoon-CI/raccoonci/internal/runnerimages"
+	"github.com/Raccoon-CI/raccoonci/pkg/runnerimages"
 	"github.com/Raccoon-CI/raccoonci/pkg/workflow"
 )
 

@@ -12,8 +12,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/Raccoon-CI/raccoonci/internal/instabox"
 	"github.com/Raccoon-CI/raccoonci/internal/sched"
+	"github.com/Raccoon-CI/raccoonci/pkg/instabox"
 	"github.com/Raccoon-CI/raccoonci/pkg/workflow"
 )
 

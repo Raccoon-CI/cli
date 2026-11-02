@@ -18,10 +18,10 @@ import (
 	"github.com/Raccoon-CI/raccoonci/internal/envsnap"
 	"github.com/Raccoon-CI/raccoonci/internal/plan"
 	"github.com/Raccoon-CI/raccoonci/internal/runnercmd"
-	"github.com/Raccoon-CI/raccoonci/internal/runnerimages"
 	"github.com/Raccoon-CI/raccoonci/internal/scan"
 	"github.com/Raccoon-CI/raccoonci/pkg/catalog"
 	"github.com/Raccoon-CI/raccoonci/pkg/platform"
+	"github.com/Raccoon-CI/raccoonci/pkg/runnerimages"
 	"github.com/Raccoon-CI/raccoonci/pkg/workflow"
 )
 

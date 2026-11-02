@@ -29,4 +29,4 @@ clean:
 
 # Refresh the embedded snapshot of what GitHub's Ubuntu runner images preinstall (needs network).
 runner-images:
-	$(GO) run ./cmd/raccoonci runner-images update internal/runnerimages/snapshot
+	$(GO) run ./cmd/raccoonci runner-images update pkg/runnerimages/snapshot
