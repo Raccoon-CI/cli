@@ -16,6 +16,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"raccoonci/internal/missing"
 	"runtime"
 	"strings"
 	"syscall"
@@ -268,6 +269,19 @@ func runWorkflow(args []string, cat *catalog.Catalog, remote *remoteFlags) (ok b
 			return false, fmt.Errorf("packing the source: %w", err)
 		}
 	}
+	var missingStore *missing.Store
+	var wfID string
+	if rel, err := filepath.Rel(repo, absPath(path)); err == nil && !strings.HasPrefix(rel, "..") {
+		wfID = filepath.ToSlash(rel)
+	}
+	if rt.prov != nil && remote == nil {
+		// Only a local run provisions here; a machine of -on instabox has
+		// its own run-instance and is deleted afterwards.
+		if missingStore, err = missing.Open(filepath.Join(rt.cacheDir, "missing", repoDirName(repository.(string))+".json")); err != nil {
+			fmt.Fprintf(os.Stderr, "raccoonci: remembering missing commands is off: %v\n", err)
+			missingStore = nil
+		}
+	}
 	cacheBucket, err := s3f.store(repoDirName(repository.(string)))
 	if err != nil {
 		return false, err
@@ -295,6 +309,8 @@ func runWorkflow(args []string, cat *catalog.Catalog, remote *remoteFlags) (ok b
 		Images:      images,
 		Catalog:     cat,
 		Provision:   rt.prov,
+		Missing:     missingStore,
+		WorkflowID:  wfID,
 		Repo:        repoDir.FS(),
 		WorkDir:     *workDir,
 		Jobs:        jobs,
