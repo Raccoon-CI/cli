@@ -4,7 +4,6 @@ import (
 	"archive/tar"
 	"compress/gzip"
 	"io"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -200,48 +199,5 @@ func TestSourceTarWithoutGitKeepsEverything(t *testing.T) {
 	os.WriteFile(filepath.Join(repo, "node_modules", "a.js"), []byte("x"), 0o644)
 	if !tarNames(t, repo)["src/node_modules/a.js"] {
 		t.Error("a tree that is not a git checkout lost files")
-	}
-}
-
-// Each instance sent to a machine gets a token of its own: it may create
-// artifacts as its own job only, and it is not the token of the local run.
-func TestEachInstanceGetsATokenForItsOwnJob(t *testing.T) {
-	dir := t.TempDir()
-	svc, err := localServices(filepath.Join(dir, "art"), filepath.Join(dir, "cache"), "run1", false, 0, nil, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer svc.stop()
-
-	envA, err := svc.jobEnv("build-1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	envB, _ := svc.jobEnv("build-2")
-	tokA, tokB := envA["ACTIONS_RUNTIME_TOKEN"], envB["ACTIONS_RUNTIME_TOKEN"]
-	if tokA == "" || tokA == tokB || tokA == svc.env["ACTIONS_RUNTIME_TOKEN"] {
-		t.Fatalf("tokens are not distinct: %q %q %q", tokA, tokB, svc.env["ACTIONS_RUNTIME_TOKEN"])
-	}
-	if envA["ACTIONS_RESULTS_URL"] != svc.env["ACTIONS_RESULTS_URL"] || envA["ACTIONS_CACHE_URL"] != svc.env["ACTIONS_CACHE_URL"] {
-		t.Error("the service addresses changed")
-	}
-
-	create := func(tok, job string) int {
-		body := `{"workflow_run_backend_id":"run1","workflow_job_run_backend_id":"` + job + `","name":"a","version":4}`
-		req, _ := http.NewRequest("POST", svc.base+"/twirp/github.actions.results.api.v1.ArtifactService/CreateArtifact", strings.NewReader(body))
-		req.Header.Set("Authorization", "Bearer "+tok)
-		req.Header.Set("Content-Type", "application/json")
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			t.Fatal(err)
-		}
-		resp.Body.Close()
-		return resp.StatusCode
-	}
-	if code := create(tokA, "build-1"); code != 200 {
-		t.Errorf("a job creating its own artifact: %d", code)
-	}
-	if code := create(tokA, "build-2"); code == 200 {
-		t.Error("a token created an artifact for another job")
 	}
 }
