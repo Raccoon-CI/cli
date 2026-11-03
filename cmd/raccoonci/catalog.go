@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Raccoon-CI/raccoonci/pkg/catalog"
+	"github.com/Raccoon-CI/lib/pkg/catalog"
 )
 
 // catalogFlags say where the catalog comes from, in layers: the built-in

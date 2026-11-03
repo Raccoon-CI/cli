@@ -6,7 +6,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"github.com/Raccoon-CI/raccoonci/internal/cliutil"
+	"github.com/Raccoon-CI/runner/pkg/cliutil"
 	"io"
 	"io/fs"
 	"os"
@@ -14,15 +14,15 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Raccoon-CI/raccoonci/internal/actions"
-	"github.com/Raccoon-CI/raccoonci/internal/envsnap"
-	"github.com/Raccoon-CI/raccoonci/internal/plan"
-	"github.com/Raccoon-CI/raccoonci/internal/runnercmd"
-	"github.com/Raccoon-CI/raccoonci/internal/scan"
-	"github.com/Raccoon-CI/raccoonci/pkg/catalog"
-	"github.com/Raccoon-CI/raccoonci/pkg/platform"
-	"github.com/Raccoon-CI/raccoonci/pkg/runnerimages"
-	"github.com/Raccoon-CI/raccoonci/pkg/workflow"
+	"github.com/Raccoon-CI/runner/pkg/actions"
+	"github.com/Raccoon-CI/cli/internal/envsnap"
+	"github.com/Raccoon-CI/cli/internal/plan"
+	"github.com/Raccoon-CI/runner/pkg/runnercmd"
+	"github.com/Raccoon-CI/runner/pkg/scan"
+	"github.com/Raccoon-CI/lib/pkg/catalog"
+	"github.com/Raccoon-CI/lib/pkg/platform"
+	"github.com/Raccoon-CI/lib/pkg/runnerimages"
+	"github.com/Raccoon-CI/lib/pkg/workflow"
 )
 
 // version is set at build time via -ldflags "-X main.version=...".

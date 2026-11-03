@@ -9,14 +9,14 @@ import (
 	"fmt"
 	"io/fs"
 
-	"github.com/Raccoon-CI/raccoonci/internal/actions"
-	"github.com/Raccoon-CI/raccoonci/internal/scan"
-	"github.com/Raccoon-CI/raccoonci/pkg/catalog"
-	"github.com/Raccoon-CI/raccoonci/pkg/expr"
-	"github.com/Raccoon-CI/raccoonci/pkg/platform"
-	"github.com/Raccoon-CI/raccoonci/pkg/runnerimages"
-	"github.com/Raccoon-CI/raccoonci/pkg/value"
-	"github.com/Raccoon-CI/raccoonci/pkg/workflow"
+	"github.com/Raccoon-CI/runner/pkg/actions"
+	"github.com/Raccoon-CI/runner/pkg/scan"
+	"github.com/Raccoon-CI/lib/pkg/catalog"
+	"github.com/Raccoon-CI/lib/pkg/expr"
+	"github.com/Raccoon-CI/lib/pkg/platform"
+	"github.com/Raccoon-CI/lib/pkg/runnerimages"
+	"github.com/Raccoon-CI/lib/pkg/value"
+	"github.com/Raccoon-CI/lib/pkg/workflow"
 )
 
 type Plan struct {

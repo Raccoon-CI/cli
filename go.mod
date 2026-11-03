@@ -1,4 +1,4 @@
-module github.com/Raccoon-CI/raccoonci
+module github.com/Raccoon-CI/cli
 
 go 1.27.1
 
@@ -30,4 +30,9 @@ require (
 	modernc.org/libc v1.79.0 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.12.1 // indirect
+)
+
+require (
+	github.com/Raccoon-CI/lib v0.1.0
+	github.com/Raccoon-CI/runner v0.1.0
 )

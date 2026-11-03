@@ -28,8 +28,8 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/Raccoon-CI/raccoonci/internal/affected"
-	"github.com/Raccoon-CI/raccoonci/pkg/catalog"
+	"github.com/Raccoon-CI/lib/pkg/affected"
+	"github.com/Raccoon-CI/lib/pkg/catalog"
 )
 
 // maxLockfile bounds reads of repo files, which come from untrusted pull requests.

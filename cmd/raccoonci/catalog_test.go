@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Raccoon-CI/raccoonci/pkg/catalog"
+	"github.com/Raccoon-CI/lib/pkg/catalog"
 )
 
 func TestCatalogKeygenAndSign(t *testing.T) {

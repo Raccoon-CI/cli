@@ -9,15 +9,15 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/Raccoon-CI/raccoonci/internal/cliutil"
-	"github.com/Raccoon-CI/raccoonci/internal/engine"
-	"github.com/Raccoon-CI/raccoonci/internal/envsnap"
-	"github.com/Raccoon-CI/raccoonci/internal/runner"
-	"github.com/Raccoon-CI/raccoonci/internal/runnercmd"
-	"github.com/Raccoon-CI/raccoonci/internal/sched"
-	"github.com/Raccoon-CI/raccoonci/pkg/catalog"
-	"github.com/Raccoon-CI/raccoonci/pkg/dispatch"
-	"github.com/Raccoon-CI/raccoonci/pkg/instabox"
+	"github.com/Raccoon-CI/runner/pkg/cliutil"
+	"github.com/Raccoon-CI/runner/pkg/engine"
+	"github.com/Raccoon-CI/cli/internal/envsnap"
+	"github.com/Raccoon-CI/runner/pkg/runner"
+	"github.com/Raccoon-CI/runner/pkg/runnercmd"
+	"github.com/Raccoon-CI/cli/internal/sched"
+	"github.com/Raccoon-CI/lib/pkg/catalog"
+	"github.com/Raccoon-CI/lib/pkg/dispatch"
+	"github.com/Raccoon-CI/lib/pkg/instabox"
 )
 
 // runWorkflow implements `raccoonci run`. The engine is runnercmd.Run; with
