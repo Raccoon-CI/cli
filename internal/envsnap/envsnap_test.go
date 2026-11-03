@@ -276,3 +276,73 @@ func TestSubdirectoryProjectsNeedTheirOwnLockfile(t *testing.T) {
 		t.Errorf("err = %v, want ErrNothingToSnapshot", err)
 	}
 }
+
+// layered returns the built-in catalog with a piece of YAML laid over it.
+func layered(t *testing.T, over string) *catalog.Catalog {
+	t.Helper()
+	c, err := catalog.Default().Overlay([]byte(over))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return c
+}
+
+// Which directories a scan for projects does not enter is the catalog's
+// `skip-dirs`, not a list in this package.
+func TestSkippedDirectoriesComeFromTheCatalog(t *testing.T) {
+	repo := fstest.MapFS{
+		"go.mod": {Data: []byte("module x\n")}, "go.sum": {Data: []byte("s\n")},
+		"node_modules/x/package.json": {Data: []byte("{}")},
+		"dist/a/package.json":         {Data: []byte("{}")},
+	}
+	compute := func(c *catalog.Catalog) error {
+		_, err := Compute(repo, c, "b", []string{"go", "node"})
+		return err
+	}
+	// Built in: node_modules is skipped, dist is not, so its manifest has no lockfile.
+	if err := compute(catalog.Default()); !errors.Is(err, ErrUnpinned) {
+		t.Errorf("built-in skip-dirs: err = %v, want ErrUnpinned (dist/a/package.json)", err)
+	}
+	// A catalog that also skips dist: nothing is left unpinned.
+	if err := compute(layered(t, "skip-dirs: [.git, node_modules, dist]\n")); err != nil {
+		t.Errorf("dist skipped by the catalog: %v", err)
+	}
+	// A catalog that does not skip node_modules: its manifest counts now.
+	if err := compute(layered(t, "skip-dirs: [.git, dist]\n")); !errors.Is(err, ErrUnpinned) {
+		t.Errorf("node_modules no longer skipped: err = %v, want ErrUnpinned", err)
+	}
+}
+
+// Which toolchains have workspaces, and of which kind, is the toolchain's
+// `workspace-kind` in the catalog.
+func TestWorkspaceKindsComeFromTheCatalog(t *testing.T) {
+	npm := fstest.MapFS{
+		"package.json":            {Data: []byte(`{"name":"root","workspaces":["packages/*"]}`)},
+		"package-lock.json":       {Data: []byte("1")},
+		"packages/a/package.json": {Data: []byte(`{"name":"a"}`)},
+	}
+	if _, err := Compute(npm, catalog.Default(), "b", []string{"node"}); err != nil {
+		t.Fatalf("built in, npm workspace: %v", err)
+	}
+	noWorkspaces := layered(t, "toolchains:\n  node: {title: Node.js, installer: node, toolcache: node, commands: [node, npm, npx, corepack], manifests: [package.json], lockfiles: [package-lock.json]}\n")
+	if _, err := Compute(npm, noWorkspaces, "b", []string{"node"}); !errors.Is(err, ErrUnpinned) {
+		t.Errorf("node without a workspace kind: err = %v, want ErrUnpinned", err)
+	}
+
+	// Go modules of a go.work are not treated as workspace members by default:
+	// a module below the root with no go.sum of its own is unpinned. A catalog
+	// that gives Go the kind "go" (the name package affected gives Go modules)
+	// treats them as members.
+	goMods := fstest.MapFS{
+		"go.work": {Data: []byte("go 1.24\n\nuse (\n\t.\n\t./tools\n)\n")},
+		"go.mod":  {Data: []byte("module x\n")}, "go.sum": {Data: []byte("s\n")},
+		"tools/go.mod": {Data: []byte("module x/tools\n")},
+	}
+	if _, err := Compute(goMods, catalog.Default(), "b", []string{"go"}); !errors.Is(err, ErrUnpinned) {
+		t.Errorf("built in, go submodule: err = %v, want ErrUnpinned", err)
+	}
+	goKind := layered(t, "toolchains:\n  go: {title: Go, installer: go, toolcache: go, commands: [go, gofmt], manifests: [go.mod], lockfiles: [go.sum], workspace-kind: go}\n")
+	if _, err := Compute(goMods, goKind, "b", []string{"go"}); err != nil {
+		t.Errorf("go with workspace-kind go: %v", err)
+	}
+}

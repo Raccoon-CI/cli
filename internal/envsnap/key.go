@@ -42,9 +42,6 @@ var ErrUnpinned = errors.New("dependencies are not pinned by a lockfile")
 // maxWalk bounds the directory walk that looks for projects.
 const maxWalk = 20000
 
-// skipDirs hold installed, vendored or VCS data, not the project's own manifests.
-var skipDirs = map[string]bool{".git": true, "node_modules": true, "vendor": true, ".venv": true, "venv": true, "target": true}
-
 // ErrNothingToSnapshot means no demanded toolchain has dependencies in the repo.
 var ErrNothingToSnapshot = errors.New("no lockfile among the toolchains this job uses")
 
@@ -99,7 +96,7 @@ func Compute(repo fs.FS, cat *catalog.Catalog, base string, toolchains []string)
 				// unless it is a member of a workspace whose lockfile, in a
 				// directory above, covers all its members.
 				if members == nil {
-					members = workspaceMembers(repo)
+					members = workspaceMembers(repo, cat)
 				}
 				if members[name][dir] && lockedAbove(dirs, dir) {
 					continue
@@ -133,17 +130,21 @@ func Compute(repo fs.FS, cat *catalog.Catalog, base string, toolchains []string)
 	return Key{Hash: hex.EncodeToString(h.Sum(nil)), Parts: parts}, nil
 }
 
-// workspaceKinds maps the package kinds package affected finds to the
-// catalog's toolchain names.
-var workspaceKinds = map[string]string{"npm": "node", "cargo": "rust"}
-
 // workspaceMembers lists, per toolchain, the directories that are members of a
 // workspace of the repository (npm, pnpm and yarn workspaces, Cargo's). Their
-// dependencies are locked by the workspace's one lockfile.
-func workspaceMembers(repo fs.FS) map[string]map[string]bool {
+// dependencies are locked by the workspace's one lockfile. Which toolchain a
+// package kind that package affected finds belongs to is the catalog's
+// (`workspace-kind` of a toolchain).
+func workspaceMembers(repo fs.FS, cat *catalog.Catalog) map[string]map[string]bool {
+	toolchainOf := map[string]string{}
+	for name, def := range cat.Toolchains {
+		if def != nil && def.WorkspaceKind != "" {
+			toolchainOf[def.WorkspaceKind] = name
+		}
+	}
 	out := map[string]map[string]bool{}
 	for _, p := range affected.Packages(repo) {
-		tc, ok := workspaceKinds[p.Kind]
+		tc, ok := toolchainOf[p.Kind]
 		if !ok {
 			continue
 		}
@@ -198,6 +199,10 @@ func findProjects(repo fs.FS, cat *catalog.Catalog, names []string) (map[string]
 	if len(owner) == 0 {
 		return out, nil
 	}
+	skip := map[string]bool{} // installed, vendored or VCS data, by the catalog's say
+	for _, d := range cat.SkipDirs {
+		skip[d] = true
+	}
 	seen := 0
 	err := fs.WalkDir(repo, ".", func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -207,7 +212,7 @@ func findProjects(repo fs.FS, cat *catalog.Catalog, names []string) (map[string]
 			return fmt.Errorf("%w: more than %d entries to search for projects", ErrUnpinned, maxWalk)
 		}
 		if d.IsDir() {
-			if p != "." && skipDirs[d.Name()] {
+			if p != "." && skip[d.Name()] {
 				return fs.SkipDir
 			}
 			return nil

@@ -20,6 +20,6 @@ require (
 )
 
 require (
-	github.com/Raccoon-CI/lib v0.2.0
+	github.com/Raccoon-CI/lib v0.3.0
 	github.com/Raccoon-CI/runner v0.1.0
 )
