@@ -14,15 +14,15 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Raccoon-CI/runner/pkg/actions"
 	"github.com/Raccoon-CI/cli/internal/envsnap"
 	"github.com/Raccoon-CI/cli/internal/plan"
-	"github.com/Raccoon-CI/runner/pkg/runnercmd"
-	"github.com/Raccoon-CI/runner/pkg/scan"
 	"github.com/Raccoon-CI/lib/pkg/catalog"
 	"github.com/Raccoon-CI/lib/pkg/platform"
 	"github.com/Raccoon-CI/lib/pkg/runnerimages"
 	"github.com/Raccoon-CI/lib/pkg/workflow"
+	"github.com/Raccoon-CI/runner/pkg/actions"
+	"github.com/Raccoon-CI/runner/pkg/runnercmd"
+	"github.com/Raccoon-CI/runner/pkg/scan"
 )
 
 // version is set at build time via -ldflags "-X main.version=...".

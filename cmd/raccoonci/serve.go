@@ -14,11 +14,11 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/Raccoon-CI/runner/pkg/cliflag"
 	"github.com/Raccoon-CI/cli/internal/ghrunner"
 	"github.com/Raccoon-CI/cli/internal/sched"
 	"github.com/Raccoon-CI/lib/pkg/dispatch"
 	"github.com/Raccoon-CI/lib/pkg/instabox"
+	"github.com/Raccoon-CI/runner/pkg/cliflag"
 )
 
 // serve implements `raccoonci serve`: GitHub Actions jobs whose runs-on has one

@@ -7,9 +7,9 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/Raccoon-CI/runner/pkg/cliutil"
 	"github.com/Raccoon-CI/lib/pkg/trigger"
 	"github.com/Raccoon-CI/lib/pkg/workflow"
+	"github.com/Raccoon-CI/runner/pkg/cliutil"
 )
 
 // matchWorkflow implements `raccoonci match`: it prints whether the event
