@@ -14,10 +14,10 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/Raccoon-CI/cli/internal/ghrunner"
-	"github.com/Raccoon-CI/cli/internal/sched"
 	"github.com/Raccoon-CI/lib/pkg/dispatch"
+	"github.com/Raccoon-CI/lib/pkg/ghrunner"
 	"github.com/Raccoon-CI/lib/pkg/instabox"
+	"github.com/Raccoon-CI/lib/pkg/sched"
 	"github.com/Raccoon-CI/runner/pkg/cliflag"
 )
 
