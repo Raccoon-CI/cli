@@ -34,7 +34,7 @@
 
 ## A.2 基准（serve 与 GitHub 托管、InstaBox 官方 runner 的对比）
 
-基准在 https://github.com/Raccoon-CI/raccoonbench。**基准的原则（用户 2026-10-31）：保持客观，不能为了我们的产品改形状；结果不好就改产品。**自有引擎的基准见 C.3。
+基准在 https://github.com/Raccoon-CI/raccoonbench。**基准的原则（用户 2026-10-31）：保持客观，不能为了我们的产品改形状；结果不好就改产品。**自有引擎的基准（原单体 TODO 的 C.3）已移到 raccoonbench 仓库，不在这里。
 
 - ✅ 完整对比（2026-10-31）：7 个 bench 仓库都有了 `bench-raccoon` 分支（`runs-on: raccoon-4vcpu`，和 `bench-github` 只差这一行），3 个有 `bench-raccoon-2c`（`raccoon-2vcpu`）；raccoonbench 新增 `raccoon-serve` 系统（`serve` 随会话启停，花费按 serve 的用量文件算）；价格文件改成 GitHub 当前价（2 核 $0.006/分钟，4 核 $0.012），`instabox-medium` 按 4 vCPU / 8 GiB 的模板估（推断）。第一轮：7 负载 × 4 系统 × 1 次；第二轮：3 负载 × 3 系统 × 3 次；第三轮：2 核对 2 核，3 负载 × 3 次。Blacksmith 和 Jog 因为要企业资质/预充 100 美元，已决定不比
 - ✅ 第二轮基准（2026-10-31，3 个负载 × 3 个系统 × 每格 3 次取中位数，GitHub 托管是 2 核、其余 4 核）：和 InstaBox 官方 runner 比，serve（webhook）在 warm 和 change 场景稳定快 2–12 s（lint-docs warm 13 对 18 s，go-integration warm 26 对 32 s，typescript-monorepo warm 52 对 64 s），原因是排队只有 1–2 s 而官方是 6–11 s；cold 场景两者相当（18/20、49/47、75/74 s）。和 GitHub 托管比，重负载明显更快（typescript-monorepo warm 52 对 111 s，go-integration cold 49 对 72 s，主要来自 4 核对 2 核），短 job 的 cold 慢约 4 s（lint-docs 18 对 14 s）。花费上 serve 比官方 runner 的估算高 3–6 倍（它是 job 秒数 × medium 规格的估算，serve 是整台机器的寿命，含启动、等待 runner 和 50 GiB 根盘），但仍只有 GitHub 托管的 5%–20%；两边口径不同，不是严格可比
@@ -45,7 +45,7 @@
 
 ## A.3 未完成与未验证
 
-- ⬜ **提高每分钟起机数量**（用户 2026-11-01 在查；和 C.2 的 InstaBox 限额是同一件事）：InstaBox Pro 每分钟最多起 10 台，是矩阵 fan-out 的瓶颈（见 A.4 的矩阵个数一段）。要确认能否提高（更高的套餐、或向 InstaBox 申请）。查到之前的备选：同一个 run 内复用机器（给刚跑完的机器换一份新的 JIT 配置，不占起机名额，代价是同一个 run 的 job 之间不再隔离，默认应关）；`-starts-per-minute` 已能跟着改
+- ⬜ **提高每分钟起机数量**（用户 2026-11-01 在查；和 lib 仓库里 `pkg/instabox` 的起机限额（原单体 TODO 的 C.2）是同一件事）：InstaBox Pro 每分钟最多起 10 台，是矩阵 fan-out 的瓶颈（见 A.4 的矩阵个数一段）。要确认能否提高（更高的套餐、或向 InstaBox 申请）。查到之前的备选：同一个 run 内复用机器（给刚跑完的机器换一份新的 JIT 配置，不占起机名额，代价是同一个 run 的 job 之间不再隔离，默认应关）；`-starts-per-minute` 已能跟着改
 - ⬜ InstaBox 30 分钟自动挂起会不会把"有 runner 在监听的机器"当成空闲，没测
 - ⬜ 真实 `schedule:` 触发没测（cron 计算和提前启动只有单测）
 - ⬜ `actions/cache` 和 artifact 在这条路径上走 GitHub 自己的服务；能否重定向到 `pkg/cache` 没试
@@ -57,7 +57,7 @@
 
 **走 Actions trigger 时做不了的加速**（GitHub 决定"跑什么、什么时候跑"，我们只提供机器）：①跳过没受影响的 job 和按内容哈希重放整个 job（runner 只执行 GitHub 发来的步骤，不能改、不能省；取消会让 run 变 cancelled）；②去掉 GitHub 自己的派发延迟（冷启动约 4–5 s：建 run 排队 1–3 s、runner 认证建会话约 2 s、派发约 1 s；有等待 runner 时下限 1–2 s）；③提前精确知道整个任务图（动态矩阵、依赖上游输出的 `if:` 要等运行时；静态部分可以读 workflow 文件得到，下游 job 的时间只能预测）；④控制排队顺序和优先级（`concurrency`、队列是 GitHub 的）；⑤同一个 run 的 job 之间原生共享工作区和服务容器；⑥替换 GitHub 的缓存、artifact、OIDC、job summary 服务（令牌和地址来自 GitHub 的 job 消息，可能能用 runner 的 `.env` 或 job-started 钩子重定向，没试过）；⑦替换 `actions/checkout`。**能做但没做**：同一台机器上多个一次性 runner 打包短 job、环境快照（sticky disk 式）、同一个 run 内复用机器、按规格保活、push/PR 事件到达时提前启动。**只有自己的 trigger 才能做**：跳过没受影响的 job、没有 GitHub 的派发下限、精确的任务图、排队控制。**自己的 trigger 做不了或代价更高**：GitHub 的全部语义（可复用 workflow、`concurrency`、环境和保护规则、OIDC、必需检查、PR 界面）、macOS/Windows/ARM（GitHub runner 装在用户自己的机器上就行）。
 
-**"跑了但实际没跑"（Actions 下跳过没受影响的 job）的两种做法**：①改造普通 runner：把 `bash`/`sh`/`python` 和 runner 自带的 `node` 换成直接退出 0 的小程序，界面上每步显示成功，要靠日志和注解说明；②自己实现 runner 协议的假 runner，把每步报成 Skipped、job 报成功，可以放在控制器上不起虚拟机（约 3 s），但协议没有官方文档（`github-act-runner` 是开源实现，没验证）。判断"该不该跳"用现有的 `internal/affected`（见 B.6），输入是变更文件列表和仓库的包依赖图。**最大风险是假绿**，所以要：默认关闭、按仓库开启；默认分支 push、tag、`schedule`、`workflow_dispatch` 一律全跑，只在 PR 上跳；workflow、本地 action、配置文件变了就全跑；任何不确定一律全跑；有 `outputs`、上传 artifact、`environment`、`container`/`services` 的 job 不跳；提供手动覆盖（PR 标签或 `[ci full]`）；"审计模式"：被判可跳的 job 偶尔真的跑，统计漏判率。**先做的不是实现，而是用真实仓库的历史做离线回放**：最近若干提交里按规则会跳过多少 job，对照这些 job 当时实际是否成功，看漏判率；漏判率不能接近零就不做。只对 monorepo 里常常不受影响的长 job 有用，单 job 仓库（基准负载）没用。
+**"跑了但实际没跑"（Actions 下跳过没受影响的 job）的两种做法**：①改造普通 runner：把 `bash`/`sh`/`python` 和 runner 自带的 `node` 换成直接退出 0 的小程序，界面上每步显示成功，要靠日志和注解说明；②自己实现 runner 协议的假 runner，把每步报成 Skipped、job 报成功，可以放在控制器上不起虚拟机（约 3 s），但协议没有官方文档（`github-act-runner` 是开源实现，没验证）。判断"该不该跳"用现有的 `pkg/affected`（在 lib 仓库，原单体 TODO 的 B.6），输入是变更文件列表和仓库的包依赖图。**最大风险是假绿**，所以要：默认关闭、按仓库开启；默认分支 push、tag、`schedule`、`workflow_dispatch` 一律全跑，只在 PR 上跳；workflow、本地 action、配置文件变了就全跑；任何不确定一律全跑；有 `outputs`、上传 artifact、`environment`、`container`/`services` 的 job 不跳；提供手动覆盖（PR 标签或 `[ci full]`）；"审计模式"：被判可跳的 job 偶尔真的跑，统计漏判率。**先做的不是实现，而是用真实仓库的历史做离线回放**：最近若干提交里按规则会跳过多少 job，对照这些 job 当时实际是否成功，看漏判率；漏判率不能接近零就不做。只对 monorepo 里常常不受影响的长 job 有用，单 job 仓库（基准负载）没用。
 
 **Node 家族专项（用户 2026-10-31 大致同意；A、B 两条路径都能用）**：Vercel 的按需构建是 **Turborepo**（任务级内容哈希缓存，输入没变就重放输出和日志，`--affected` 只跑受影响的包）；**Turbopack** 是 Next.js 里的增量打包器（进程内函数级缓存），两者思路相同、粒度不同。原则：**让用户自己的工具按内容哈希来跳过，我们负责把缓存放在近处**，正确性由工具保证，不会有我们猜依赖导致的假绿。按把握从大到小：
 - ⬜ **注入 Turborepo / Nx 的远程缓存**：据我所知两者都有公开的 HTTP 接口、可自托管（**没核对细节**）；用我们的对象存储（`pkg/blob`）写一个小服务，用 runner 目录里的 `.env` 注入 `TURBO_API`/`TURBO_TOKEN` 等变量，用户不用改 workflow。Actions 和自己的 trigger 两种路径都能用。验证办法：`create-turbo` 生成真实项目，写最小的缓存服务，跑两次 `turbo run build`，看是否命中、重放、省多少。风险最大的一项，因为依赖对接口的记忆
