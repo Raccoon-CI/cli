@@ -143,7 +143,7 @@ func workspaceMembers(repo fs.FS, cat *catalog.Catalog) map[string]map[string]bo
 		}
 	}
 	out := map[string]map[string]bool{}
-	for _, p := range affected.Packages(repo) {
+	for _, p := range affected.PackagesSkipping(repo, affected.SkipDirs(cat)) {
 		tc, ok := toolchainOf[p.Kind]
 		if !ok {
 			continue

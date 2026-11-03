@@ -125,7 +125,7 @@ func main() {
 	case len(args) >= 1 && args[0] == "serve":
 		err = serve(args[1:])
 	case len(args) >= 1 && args[0] == "affected":
-		err = affectedJobs(os.Stdout, args[1:])
+		err = affectedJobs(os.Stdout, args[1:], cat)
 	case len(args) >= 1 && args[0] == "match":
 		var ok bool
 		if ok, err = matchWorkflow(os.Stdout, args[1:]); err == nil && !ok {

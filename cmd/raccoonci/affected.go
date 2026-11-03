@@ -10,12 +10,13 @@ import (
 	"strings"
 
 	"github.com/Raccoon-CI/lib/pkg/affected"
+	"github.com/Raccoon-CI/lib/pkg/catalog"
 	"github.com/Raccoon-CI/lib/pkg/workflow"
 )
 
 // affectedJobs implements `raccoonci affected`: which jobs the changes
-// concern, and why.
-func affectedJobs(out io.Writer, args []string) error {
+// concern, and why. The directories package discovery skips are the catalog's.
+func affectedJobs(out io.Writer, args []string, cat *catalog.Catalog) error {
 	fs := flag.NewFlagSet("affected", flag.ExitOnError)
 	var ef cliutil.EventFlags
 	ef.Register(fs, true)
@@ -64,11 +65,11 @@ func affectedJobs(out io.Writer, args []string) error {
 		fmt.Fprintf(out, "changed files: %d\n", len(ev.Files))
 	}
 	if *pkgs {
-		for _, p := range affected.Packages(root.FS()) {
+		for _, p := range affected.PackagesSkipping(root.FS(), affected.SkipDirs(cat)) {
 			fmt.Fprintf(out, "package %s (%s) %s depends on %v\n", p.Dir, p.Kind, p.Name, p.Deps)
 		}
 	}
-	decisions := affected.Decide(affected.Input{Workflow: w, WorkflowPath: rel, Files: ev.Files, Repo: root.FS(), Config: cfg})
+	decisions := affected.Decide(affected.Input{Workflow: w, WorkflowPath: rel, Files: ev.Files, Repo: root.FS(), Config: cfg, SkipDirs: affected.SkipDirs(cat)})
 	for _, j := range w.Jobs {
 		d := decisions[j.ID]
 		switch safe, why := affected.Skippable(j); {

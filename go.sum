@@ -1,5 +1,5 @@
-github.com/Raccoon-CI/lib v0.3.0 h1:ZucDjUy/HOlPHhlUkcB2maSoGkQ3I/mP/nAjgDHOO1k=
-github.com/Raccoon-CI/lib v0.3.0/go.mod h1:1UDYH5hFJSmu43gg2iKvHprAGIk4z/D6drE30uM+hPU=
+github.com/Raccoon-CI/lib v0.4.0 h1:FL+lpTXbYe6cz3rHSarkd6+jrLvNPUbb1Rvb5GLjpE0=
+github.com/Raccoon-CI/lib v0.4.0/go.mod h1:1UDYH5hFJSmu43gg2iKvHprAGIk4z/D6drE30uM+hPU=
 github.com/Raccoon-CI/runner v0.1.0 h1:/vuFbnU4j7QnHKzM/uLY2DMYZ0E4PJg/dJnj0uFW/qE=
 github.com/Raccoon-CI/runner v0.1.0/go.mod h1:61XXEuKiMqu/96hMuwdH76mwodko//jbxvSG06Suoq0=
 github.com/aws/aws-sdk-go-v2 v1.47.5 h1:5yA+A+BiXbDq1ZLbYwPViwhEGDMdR0MEhL8Jh2LnLS4=
