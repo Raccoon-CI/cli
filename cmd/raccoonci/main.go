@@ -48,6 +48,10 @@ commands:
   runner-snapshot [flags]            build the InstaBox snapshot that run -on instabox starts
                                      machines from (needs an API key)
   catalog update                     pull the catalog feed now (needs -catalog-url)
+  catalog keygen -out FILE           make a feed signing key: private key to FILE (0600),
+                                     public key printed
+  catalog sign FILE                  write FILE.sig; the private key comes from the
+                                     environment variable RACCOONCI_CATALOG_SIGNING_KEY
   runner-images update <dir>         fetch what GitHub's Ubuntu runner images preinstall into
                                      snapshot files (uses GITHUB_TOKEN for the API fallback if set)
 
@@ -58,8 +62,9 @@ built up in layers, each on top of the one before:
   -catalog-url URL       a feed pulled over https and cached on disk, refreshed
                          when a day old; offline, the cached copy is used
                          (env RACCOONCI_CATALOG_URL)
-  -catalog-key KEY       base64 ed25519 public key; with it, a feed must carry
-                         a valid signature at URL.sig (env RACCOONCI_CATALOG_KEY)
+  -catalog-key KEYS      base64 ed25519 public key(s), comma-separated; with it, a
+                         feed must carry a valid signature at URL.sig from any one
+                         of them (env RACCOONCI_CATALOG_KEY)
   -catalog file.yaml     a local file
 `
 
@@ -68,7 +73,7 @@ func main() {
 	var cf catalogFlags
 	flag.StringVar(&cf.file, "catalog", "", "overlay this catalog file on top")
 	flag.StringVar(&cf.url, "catalog-url", os.Getenv("RACCOONCI_CATALOG_URL"), "pull a catalog feed from this https URL")
-	flag.StringVar(&cf.key, "catalog-key", os.Getenv("RACCOONCI_CATALOG_KEY"), "require feeds to be signed by this base64 ed25519 public key")
+	flag.StringVar(&cf.key, "catalog-key", os.Getenv("RACCOONCI_CATALOG_KEY"), "require feeds to be signed by one of these base64 ed25519 public keys (comma-separated)")
 	flag.Usage = func() { fmt.Fprint(os.Stderr, usage) }
 	flag.Parse()
 
@@ -77,8 +82,18 @@ func main() {
 		return
 	}
 	var err error
-	if args := flag.Args(); len(args) == 2 && args[0] == "catalog" && args[1] == "update" {
-		if err = updateCatalog(cf); err != nil {
+	if args := flag.Args(); len(args) >= 2 && args[0] == "catalog" {
+		switch {
+		case args[1] == "update" && len(args) == 2:
+			err = updateCatalog(cf)
+		case args[1] == "keygen":
+			err = catalogKeygen(args[2:])
+		case args[1] == "sign":
+			err = catalogSign(args[2:])
+		default:
+			err = fmt.Errorf("unknown command: catalog %s", strings.Join(args[1:], " "))
+		}
+		if err != nil {
 			fmt.Fprintln(os.Stderr, "raccoonci:", err)
 			os.Exit(1)
 		}
