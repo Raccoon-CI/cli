@@ -34,7 +34,7 @@ make build        # dist/raccoonci
 make check        # go vet + go test -race
 ```
 
-需要 Go 1.27 或更新版本。模块依赖 `lib v0.1.0` 和 `runner v0.1.0`（都已发布），所以直接 `go build ./cmd/raccoonci` 就行。同时改几个仓库时见 `CLAUDE.md` 的 "Developing across the repositories"。
+需要 Go 1.27 或更新版本。模块依赖 `lib v0.4.0` 和 `runner v0.2.0`（都已发布），所以直接 `go build ./cmd/raccoonci` 就行。同时改几个仓库时见 `CLAUDE.md` 的 "Developing across the repositories"。
 
 ## 进度
 

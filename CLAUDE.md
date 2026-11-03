@@ -21,7 +21,7 @@ Direction of dependencies: lib <- runner <- cli (and lib <- backend). This repos
 
 ## Developing across the repositories
 
-go.mod requires the published `lib v0.1.0` and `runner v0.1.0`, so `go build ./... && go test ./...` work on their own, and so does CI. To try a change to lib or runner together with this repository, put the checkouts side by side and add a `go.work` next to them with a `use` line for each directory (do not commit it). A release of lib or runner is a new tag there; bump the `require` here afterwards.
+go.mod requires the published `lib v0.4.0` and `runner v0.2.0`, so `go build ./... && go test ./...` work on their own, and so does CI. To try a change to lib or runner together with this repository, put the checkouts side by side and add a `go.work` next to them with a `use` line for each directory (do not commit it). A release of lib or runner is a new tag there; bump the `require` here afterwards.
 
 ## Commands
 

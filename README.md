@@ -34,7 +34,7 @@ make build        # dist/raccoonci
 make check        # go vet + go test -race
 ```
 
-Go 1.27 or newer. The module requires `lib v0.1.0` and `runner v0.1.0` (both published), so a plain `go build ./cmd/raccoonci` works. See `CLAUDE.md` ("Developing across the repositories") for working on several repositories at once.
+Go 1.27 or newer. The module requires `lib v0.4.0` and `runner v0.2.0` (both published), so a plain `go build ./cmd/raccoonci` works. See `CLAUDE.md` ("Developing across the repositories") for working on several repositories at once.
 
 ## Status
 
