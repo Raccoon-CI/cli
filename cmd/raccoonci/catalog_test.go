@@ -67,8 +67,13 @@ func TestCatalogFlagsSeveralKeys(t *testing.T) {
 	if err != nil || len(src.PublicKeys) != 2 {
 		t.Fatalf("%v %v", src, err)
 	}
-	if src, err = (catalogFlags{}).source(); src != nil || err != nil {
-		t.Errorf("no url, no default: %v %v", src, err)
+	// Nothing named: the built-in feed address and keys, if there are any.
+	src, err = (catalogFlags{}).source()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if (catalog.DefaultFeedURL == "") != (src == nil) || (src != nil && src.URL != catalog.DefaultFeedURL) {
+		t.Errorf("nothing named: want the default feed %q, got %v", catalog.DefaultFeedURL, src)
 	}
 	if _, err = (catalogFlags{url: "https://x.test/c.yaml", key: "junk"}).source(); err == nil {
 		t.Error("a bad key must be an error")
