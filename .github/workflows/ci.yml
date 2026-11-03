@@ -1,4 +1,3 @@
-# Fails until lib v0.1.0 and raccoonci-runner v0.1.0 are tagged (go.mod requires them).
 name: ci
 
 on:

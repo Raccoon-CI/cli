@@ -34,7 +34,7 @@ make build        # dist/raccoonci
 make check        # go vet + go test -race
 ```
 
-Go 1.27 or newer. The module requires `lib v0.1.0` and `raccoonci-runner v0.1.0`, which are **not tagged yet**: until they are, `go build` only works through a `go.work` that uses local checkouts of lib and runner, and this repository's CI fails. See `CLAUDE.md` ("Developing before the tags exist").
+Go 1.27 or newer. The module requires `lib v0.1.0` and `runner v0.1.0` (both published), so a plain `go build ./cmd/raccoonci` works. See `CLAUDE.md` ("Developing across the repositories") for working on several repositories at once.
 
 ## Status
 

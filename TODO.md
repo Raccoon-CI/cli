@@ -1,6 +1,6 @@
 # Raccoon CI cli 仓库：进度与待办
 
-更新于 2026-11-03。`make check` 全绿（需要 go.work，见 CLAUDE.md；lib、runner 打 v0.1.0 标签前 CI 会失败）。
+更新于 2026-11-03。`make check` 全绿，CI 通过（依赖已发布的 lib 和 runner `v0.1.0`）。
 
 图例：✅ 完成　🟡 部分完成　⬜ 未开始
 

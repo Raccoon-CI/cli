@@ -19,9 +19,9 @@ Direction of dependencies: lib <- runner <- cli (and lib <- backend). This repos
 
 **Never import the `internal/` packages of runner or lib** (runner: `internal/docker`, `local`, `mirror`, `missing`, `nodejs`, `provision`, `semver`; lib: `internal/azblob`, `twirp`). Go refuses it across modules; if something needed is internal, make it public in the owning repository instead of copying it here. This repository must never be imported by runner, lib or backend.
 
-## Developing before the tags exist
+## Developing across the repositories
 
-go.mod requires `lib v0.1.0` and `raccoonci-runner v0.1.0`, which are not tagged yet. `../go.work` uses the four directories (`lib`, `runner`, `cli`, `backend`) and replaces both modules with the local ones, so `go build ./... && go test ./...` work offline inside this directory. Do NOT run `go mod tidy` until the tags exist (it would try to fetch them); unused third-party requirements in go.mod are harmless. Run `go mod tidy` once lib v0.1.0 and runner v0.1.0 are tagged. CI fails until then.
+go.mod requires the published `lib v0.1.0` and `runner v0.1.0`, so `go build ./... && go test ./...` work on their own, and so does CI. To try a change to lib or runner together with this repository, put the checkouts side by side and add a `go.work` next to them with a `use` line for each directory (do not commit it). A release of lib or runner is a new tag there; bump the `require` here afterwards.
 
 ## Commands
 
