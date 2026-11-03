@@ -1,11 +1,13 @@
 GO ?= go
 VERSION ?= dev
+# The snapshot lives in the lib repository (a sibling checkout).
+RUNNER_IMAGES_DIR ?= ../lib/pkg/runnerimages/snapshot
 LDFLAGS := -s -w -X main.version=$(VERSION)
 
 .PHONY: build runner-binary test race vet check clean runner-images
 
 build:
-	$(GO) build -trimpath -ldflags "$(LDFLAGS)" -o dist/ ./cmd/raccoonci ./cmd/raccoonci-runner ./cmd/raccoonci-server
+	$(GO) build -trimpath -ldflags "$(LDFLAGS)" -o dist/ ./cmd/raccoonci
 
 # The binary the InstaBox runner snapshot installs: static, so it runs on any
 # template. Build it with a real VERSION; `raccoonci runner-snapshot` refuses "dev".
@@ -29,4 +31,4 @@ clean:
 
 # Refresh the embedded snapshot of what GitHub's Ubuntu runner images preinstall (needs network).
 runner-images:
-	$(GO) run ./cmd/raccoonci runner-images update pkg/runnerimages/snapshot
+	$(GO) run ./cmd/raccoonci runner-images update $(RUNNER_IMAGES_DIR)
